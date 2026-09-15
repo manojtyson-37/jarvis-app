@@ -221,7 +221,7 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
 
     case 'mark_reminder_done':
       await markReminderDone(userId, args.reminder_id as string);
-      return 'Reminder marked done.';
+      return 'ok';
 
     case 'log_workout':
       await logWorkout(userId, {
@@ -431,6 +431,10 @@ export async function POST(req: NextRequest) {
   }
 
   let reply = response.choices[0]?.message?.content ?? '';
+  // Guard against model stuttering (e.g. "Done.Done." or "Removed.Removed.")
+  const half = reply.slice(0, Math.floor(reply.length / 2));
+  if (half.length > 2 && half + half === reply) reply = half;
+  reply = reply.trim();
 
   // ~35% chance to append a follow-up question (runs before return — Vercel serverless requirement)
   if (Math.random() < 0.35 && reply.length < 500 && !reply.includes('?')) {
