@@ -146,7 +146,7 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'create_calendar_event',
-      description: 'Create a new event on Google Calendar.',
+      description: 'Create a new event on Google Calendar. Returns the event ID — store it in case user wants to delete or update it.',
       parameters: {
         type: 'object',
         properties: {
@@ -156,6 +156,20 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
           description: { type: 'string' },
         },
         required: ['title', 'start', 'end'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_calendar_event',
+      description: 'Delete a Google Calendar event by its ID. Use when user wants to remove an event or correct a mistake (delete wrong event, then create the correct one).',
+      parameters: {
+        type: 'object',
+        properties: {
+          event_id: { type: 'string', description: 'The Google Calendar event ID returned by create_calendar_event or get_calendar_events' },
+        },
+        required: ['event_id'],
       },
     },
   },
@@ -297,12 +311,12 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (!res.ok) return `Calendar fetch failed: ${res.status}`;
-      const data = await res.json() as { items: { summary: string; start: { dateTime?: string; date?: string }; end: { dateTime?: string; date?: string }; description?: string }[] };
+      const data = await res.json() as { items: { id: string; summary: string; start: { dateTime?: string; date?: string }; end: { dateTime?: string; date?: string }; description?: string }[] };
       if (!data.items?.length) return `No events in the next ${days} days.`;
       return data.items.map(e => {
         const start = e.start.dateTime ?? e.start.date ?? '';
         const d = start ? new Date(start).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' }) : '';
-        return `• ${e.summary} — ${d}${e.description ? `\n  ${e.description.slice(0, 80)}` : ''}`;
+        return `• [${e.id}] ${e.summary} — ${d}${e.description ? `\n  ${e.description.slice(0, 80)}` : ''}`;
       }).join('\n');
     }
 
@@ -320,8 +334,19 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
         }),
       });
       if (!res.ok) return `Failed to create event: ${res.status}`;
-      const ev = await res.json() as { summary: string; htmlLink: string };
-      return `Event created: "${ev.summary}" — ${ev.htmlLink}`;
+      const ev = await res.json() as { id: string; summary: string; htmlLink: string };
+      return `Event created: "${ev.summary}" (id: ${ev.id}) — ${ev.htmlLink}`;
+    }
+
+    case 'delete_calendar_event': {
+      const token = await getGoogleAccessToken();
+      if (!token) return 'Google Calendar not configured.';
+      const res = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(args.event_id as string)}`,
+        { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.status === 204 || res.ok) return 'Event deleted.';
+      return `Failed to delete event: ${res.status}`;
     }
 
     default:
