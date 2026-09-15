@@ -56,6 +56,7 @@ export default function MayaPage() {
   const [transcript, setTranscript] = useState('');
   const transcriptRef = useRef('');
   const recognitionRef = useRef<{ stop: () => void } | null>(null);
+  const shouldListenRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const [notes, setNotes] = useState<Note[]>([]);
@@ -147,31 +148,59 @@ export default function MayaPage() {
     }
   }, [loading]);
 
+  const stopListening = useCallback((action: 'cancel' | 'pause' | 'send' = 'pause') => {
+    shouldListenRef.current = false;
+    recognitionRef.current?.stop();
+    setListening(false);
+    const final = transcriptRef.current;
+    setTranscript('');
+    transcriptRef.current = '';
+    if (action === 'send' && final.trim()) {
+      send(final);
+    } else if (action === 'pause' && final.trim()) {
+      setInput(final);
+    }
+  }, [send]);
+
   const startListening = useCallback(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const w = window as any;
     const SpeechRecognition = w.SpeechRecognition ?? w.webkitSpeechRecognition;
     if (!SpeechRecognition) { alert('Voice not supported. Use Chrome on Android.'); return; }
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-IN';
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.onstart = () => setListening(true);
-    recognition.onend = () => {
-      setListening(false);
-      const final = transcriptRef.current;
-      if (final.trim()) { send(final); setTranscript(''); transcriptRef.current = ''; }
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recognition.onresult = (e: any) => {
-      const t = Array.from(e.results).map((r: any) => (r as any)[0].transcript).join('');
-      setTranscript(t); transcriptRef.current = t;
-    };
-    recognitionRef.current = recognition;
-    recognition.start();
-  }, [send]);
+    shouldListenRef.current = true;
+    setListening(true);
+    setTranscript('');
+    transcriptRef.current = '';
 
-  const stopListening = useCallback(() => recognitionRef.current?.stop(), []);
+    const launch = () => {
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'en-IN';
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recognition.onresult = (e: any) => {
+        let t = '';
+        for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
+        setTranscript(t);
+        transcriptRef.current = t;
+      };
+      recognition.onend = () => {
+        if (shouldListenRef.current) {
+          // browser timed out — restart silently
+          try { launch(); } catch { /* give up */ }
+        }
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recognition.onerror = (e: any) => {
+        if (e.error === 'aborted') return;
+        shouldListenRef.current = false;
+        setListening(false);
+      };
+      recognitionRef.current = { stop: () => recognition.abort() };
+      recognition.start();
+    };
+    launch();
+  }, []);
 
   async function logout() {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -220,7 +249,7 @@ export default function MayaPage() {
               {messages.length === 0 && (
                 <div className="text-center text-zinc-600 text-sm mt-16">
                   <div className="text-2xl mb-2">◈</div>
-                  <p>Hold mic to speak, or type below.</p>
+                  <p>Tap mic to speak, or type below.</p>
                   <p className="mt-2 text-xs text-zinc-700 space-y-1">
                     "Remind me to call the bank in 2 hours"<br />
                     "Log expense: ₹500 food"<br />
@@ -258,38 +287,64 @@ export default function MayaPage() {
               <div ref={bottomRef} />
             </div>
 
-            {listening && transcript && (
-              <div className="px-4 py-2 text-xs text-zinc-400 italic border-t border-zinc-800 bg-zinc-900">
-                &ldquo;{transcript}&rdquo;
-              </div>
-            )}
-
-            <div className="px-3 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center gap-2">
-              <input
-                className="flex-1 bg-zinc-800 text-zinc-100 text-sm rounded-full px-4 py-2.5 outline-none placeholder:text-zinc-500"
-                placeholder="Type a message..."
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && send(input)}
-                disabled={loading || listening}
-              />
-              {input.trim() ? (
-                <button onClick={() => send(input)} disabled={loading}
-                  className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center shrink-0 active:scale-95 transition-transform">
-                  <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7" />
+            {listening ? (
+              /* ── Recording bar ── */
+              <div className="px-3 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center gap-2">
+                {/* Cancel */}
+                <button onClick={() => stopListening('cancel')}
+                  className="w-9 h-9 rounded-full bg-zinc-700 flex items-center justify-center shrink-0 active:scale-95 transition-transform">
+                  <svg className="w-4 h-4 text-zinc-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
-              ) : (
-                <button onPointerDown={startListening} onPointerUp={stopListening} onPointerLeave={stopListening}
-                  className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 relative transition-all ${listening ? 'bg-red-600 scale-110' : 'bg-zinc-700 active:scale-95'}`}>
-                  {listening && <span className="absolute inset-0 rounded-full bg-red-600 pulse-ring" />}
+                {/* Live transcript */}
+                <div className="flex-1 text-sm text-zinc-300 italic truncate px-1 min-w-0">
+                  {transcript || <span className="text-zinc-500">Listening…</span>}
+                </div>
+                {/* Mic (tap = pause → puts transcript in input) */}
+                <button onClick={() => stopListening('pause')}
+                  className="w-11 h-11 rounded-full bg-red-600 flex items-center justify-center shrink-0 relative active:scale-95 transition-all">
+                  <span className="absolute inset-0 rounded-full bg-red-600 pulse-ring" />
                   <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3zm-1 19.93A8.001 8.001 0 0 1 4 13H2a10.001 10.001 0 0 0 9 9.93V23h2v-.07A10.001 10.001 0 0 0 22 13h-2a8.001 8.001 0 0 1-7 7.93z"/>
                   </svg>
                 </button>
-              )}
-            </div>
+                {/* Send immediately */}
+                <button onClick={() => stopListening('send')} disabled={!transcript.trim()}
+                  className="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center shrink-0 active:scale-95 transition-transform disabled:opacity-30">
+                  <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7" />
+                  </svg>
+                </button>
+              </div>
+            ) : (
+              /* ── Default input bar ── */
+              <div className="px-3 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center gap-2">
+                <input
+                  className="flex-1 bg-zinc-800 text-zinc-100 text-sm rounded-full px-4 py-2.5 outline-none placeholder:text-zinc-500"
+                  placeholder="Type a message..."
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && send(input)}
+                  disabled={loading}
+                />
+                {input.trim() ? (
+                  <button onClick={() => send(input)} disabled={loading}
+                    className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center shrink-0 active:scale-95 transition-transform">
+                    <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7" />
+                    </svg>
+                  </button>
+                ) : (
+                  <button onClick={startListening} disabled={loading}
+                    className="w-12 h-12 rounded-full bg-zinc-700 flex items-center justify-center shrink-0 active:scale-95 transition-all">
+                    <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3zm-1 19.93A8.001 8.001 0 0 1 4 13H2a10.001 10.001 0 0 0 9 9.93V23h2v-.07A10.001 10.001 0 0 0 22 13h-2a8.001 8.001 0 0 1-7 7.93z"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
