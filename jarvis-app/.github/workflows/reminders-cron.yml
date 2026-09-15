@@ -1,0 +1,16 @@
+name: Maya Reminders
+
+on:
+  schedule:
+    - cron: '* * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire reminders
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            https://jarvis-app-jade.vercel.app/api/cron/reminders
