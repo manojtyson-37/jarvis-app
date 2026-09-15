@@ -172,6 +172,9 @@ export default function MayaPage() {
     setTranscript('');
     transcriptRef.current = '';
 
+    // Persists across auto-restarts so finalized segments aren't lost
+    let accumulatedFinal = '';
+
     const launch = () => {
       const recognition = new SpeechRecognition();
       recognition.lang = 'en-IN';
@@ -179,14 +182,23 @@ export default function MayaPage() {
       recognition.interimResults = true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onresult = (e: any) => {
-        let t = '';
-        for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
-        setTranscript(t);
-        transcriptRef.current = t;
+        // Only process newly added/updated results starting at e.resultIndex
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const chunk = e.results[i][0].transcript as string;
+          if (e.results[i].isFinal) {
+            accumulatedFinal += chunk + ' ';
+          } else {
+            interim = chunk;
+          }
+        }
+        const full = (accumulatedFinal + interim).trim();
+        setTranscript(full);
+        transcriptRef.current = full;
       };
       recognition.onend = () => {
         if (shouldListenRef.current) {
-          // browser timed out — restart silently
+          // browser timed out — restart silently, carry accumulated finals
           try { launch(); } catch { /* give up */ }
         }
       };
