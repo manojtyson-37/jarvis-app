@@ -188,53 +188,47 @@ export default function MayaPage() {
     setTranscript('');
     transcriptRef.current = '';
 
-    // Accumulates final text across sessions (continuous:false restarts)
-    let accumulatedFinal = '';
-    // Interim from current session
-    let currentInterim = '';
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-IN';
+    recognition.continuous = false;
+    recognition.interimResults = true;
 
-    const launch = () => {
-      const recognition = new SpeechRecognition();
-      recognition.lang = 'en-IN';
-      // continuous:false — each session = one clean utterance, no overlap on restart
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      currentInterim = '';
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      recognition.onresult = (e: any) => {
-        let interim = '';
-        for (let i = 0; i < e.results.length; i++) {
-          if (e.results[i].isFinal) {
-            accumulatedFinal += e.results[i][0].transcript as string + ' ';
-            interim = '';
-          } else {
-            interim = e.results[i][0].transcript as string;
-          }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onresult = (e: any) => {
+      let interim = '';
+      for (let i = 0; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          // Append final to transcriptRef directly — no restart so no overlap risk
+          transcriptRef.current = (transcriptRef.current + ' ' + (e.results[i][0].transcript as string)).trim();
+          interim = '';
+        } else {
+          interim = e.results[i][0].transcript as string;
         }
-        currentInterim = interim;
-        const full = (accumulatedFinal + interim).trim();
-        setTranscript(full);
-        transcriptRef.current = full;
-      };
+      }
+      setTranscript((transcriptRef.current + (interim ? ' ' + interim : '')).trim());
+    };
 
-      recognition.onend = () => {
-        currentInterim = '';
-        if (shouldListenRef.current) {
-          // Restart immediately for next utterance
-          try { launch(); } catch { /* give up */ }
-        }
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      recognition.onerror = (e: any) => {
-        if (e.error === 'aborted' || e.error === 'no-speech') return;
+    // Session ends naturally (pause in speech) — keep transcript in bar, stay in recording UI
+    // User taps ↑ to send, ✕ to cancel, or mic again to add more
+    recognition.onend = () => {
+      if (shouldListenRef.current && transcriptRef.current) {
+        // Keep listening state active so bar stays visible; user decides next action
+        setListening(true);
+      } else if (shouldListenRef.current) {
+        // No speech detected, silently stop
         shouldListenRef.current = false;
         setListening(false);
-      };
-      recognitionRef.current = { stop: () => recognition.abort() };
-      recognition.start();
+      }
     };
-    launch();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onerror = (e: any) => {
+      if (e.error === 'aborted' || e.error === 'no-speech') return;
+      shouldListenRef.current = false;
+      setListening(false);
+    };
+    recognitionRef.current = { stop: () => recognition.abort() };
+    recognition.start();
   }, []);
 
   async function logout() {
