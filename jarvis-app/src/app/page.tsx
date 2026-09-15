@@ -188,47 +188,46 @@ export default function MayaPage() {
     setTranscript('');
     transcriptRef.current = '';
 
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-IN';
-    recognition.continuous = false;
-    recognition.interimResults = true;
+    const launch = (SpeechRecognitionCtor: new () => SpeechRecognition) => {
+      const recognition = new SpeechRecognitionCtor();
+      recognition.lang = 'en-IN';
+      recognition.continuous = false;
+      recognition.interimResults = true;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recognition.onresult = (e: any) => {
-      let interim = '';
-      for (let i = 0; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          // Append final to transcriptRef directly — no restart so no overlap risk
-          transcriptRef.current = (transcriptRef.current + ' ' + (e.results[i][0].transcript as string)).trim();
-          interim = '';
-        } else {
-          interim = e.results[i][0].transcript as string;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recognition.onresult = (e: any) => {
+        let interim = '';
+        for (let i = 0; i < e.results.length; i++) {
+          if (e.results[i].isFinal) {
+            transcriptRef.current = (transcriptRef.current + ' ' + (e.results[i][0].transcript as string)).trim();
+            interim = '';
+          } else {
+            interim = e.results[i][0].transcript as string;
+          }
         }
-      }
-      setTranscript((transcriptRef.current + (interim ? ' ' + interim : '')).trim());
-    };
+        setTranscript((transcriptRef.current + (interim ? ' ' + interim : '')).trim());
+      };
 
-    // Session ends naturally (pause in speech) — keep transcript in bar, stay in recording UI
-    // User taps ↑ to send, ✕ to cancel, or mic again to add more
-    recognition.onend = () => {
-      if (shouldListenRef.current && transcriptRef.current) {
-        // Keep listening state active so bar stays visible; user decides next action
-        setListening(true);
-      } else if (shouldListenRef.current) {
-        // No speech detected, silently stop
+      recognition.onend = () => {
+        if (!shouldListenRef.current) return;
+        // 250ms delay drains the mic buffer before next session — prevents overlap
+        setTimeout(() => {
+          if (shouldListenRef.current) {
+            try { launch(SpeechRecognitionCtor); } catch { /* give up */ }
+          }
+        }, 250);
+      };
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recognition.onerror = (e: any) => {
+        if (e.error === 'aborted' || e.error === 'no-speech') return;
         shouldListenRef.current = false;
         setListening(false);
-      }
+      };
+      recognitionRef.current = { stop: () => recognition.abort() };
+      recognition.start();
     };
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recognition.onerror = (e: any) => {
-      if (e.error === 'aborted' || e.error === 'no-speech') return;
-      shouldListenRef.current = false;
-      setListening(false);
-    };
-    recognitionRef.current = { stop: () => recognition.abort() };
-    recognition.start();
+    launch(SpeechRecognition as unknown as new () => SpeechRecognition);
   }, []);
 
   async function logout() {
