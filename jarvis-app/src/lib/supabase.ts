@@ -1,0 +1,216 @@
+import { createClient } from '@supabase/supabase-js';
+
+export const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+// ── Notes ──────────────────────────────────────────────────────────────────
+
+export async function saveNote(userId: string, content: string, tags: string[] = []) {
+  const { data, error } = await supabase
+    .from('notes').insert({ user_id: userId, content, tags }).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function searchNotes(userId: string, query: string) {
+  const { data, error } = await supabase
+    .from('notes').select('*').eq('user_id', userId)
+    .textSearch('content', query, { type: 'websearch', config: 'english' })
+    .order('created_at', { ascending: false }).limit(5);
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function getRecentNotes(userId: string, limit = 10) {
+  const { data, error } = await supabase
+    .from('notes').select('*').eq('user_id', userId)
+    .order('created_at', { ascending: false }).limit(limit);
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function deleteNote(userId: string, noteId: string) {
+  const { error } = await supabase
+    .from('notes').delete().eq('id', noteId).eq('user_id', userId);
+  if (error) throw error;
+}
+
+// ── Reminders ──────────────────────────────────────────────────────────────
+
+export async function saveReminder(userId: string, text: string, remindAt: string) {
+  const { data, error } = await supabase
+    .from('reminders').insert({ user_id: userId, text, remind_at: remindAt, fired: false })
+    .select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function listReminders(userId: string) {
+  const { data, error } = await supabase
+    .from('reminders').select('*').eq('user_id', userId).eq('fired', false)
+    .order('remind_at', { ascending: true }).limit(20);
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function markReminderDone(userId: string, reminderId: string) {
+  const { error } = await supabase
+    .from('reminders').update({ fired: true }).eq('id', reminderId).eq('user_id', userId);
+  if (error) throw error;
+}
+
+export async function deleteReminder(userId: string, reminderId: string) {
+  const { error } = await supabase
+    .from('reminders').delete().eq('id', reminderId).eq('user_id', userId);
+  if (error) throw error;
+}
+
+// ── Fitness ────────────────────────────────────────────────────────────────
+
+export async function logWorkout(userId: string, workout: Record<string, unknown>) {
+  const { data, error } = await supabase
+    .from('fitness_logs').insert({ user_id: userId, ...workout }).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function getRecentWorkouts(userId: string, days = 7) {
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const { data, error } = await supabase
+    .from('fitness_logs').select('*').eq('user_id', userId)
+    .gte('logged_at', since).order('logged_at', { ascending: false });
+  if (error) throw error;
+  return data ?? [];
+}
+
+// ── Finance ────────────────────────────────────────────────────────────────
+
+export async function logFinance(
+  userId: string,
+  type: 'income' | 'expense',
+  amount: number,
+  category: string,
+  description: string
+) {
+  const { data, error } = await supabase
+    .from('finance_logs')
+    .insert({ user_id: userId, type, amount, category, description })
+    .select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function getFinanceSummary(userId: string, days = 30) {
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const { data, error } = await supabase
+    .from('finance_logs').select('*').eq('user_id', userId)
+    .gte('logged_at', since).order('logged_at', { ascending: false });
+  if (error) throw error;
+  const logs = data ?? [];
+  const income = logs.filter((l: { type: string }) => l.type === 'income')
+    .reduce((s: number, l: { amount: number }) => s + Number(l.amount), 0);
+  const expense = logs.filter((l: { type: string }) => l.type === 'expense')
+    .reduce((s: number, l: { amount: number }) => s + Number(l.amount), 0);
+  return { income, expense, net: income - expense, logs };
+}
+
+// ── Conversation ───────────────────────────────────────────────────────────
+
+export async function getConversationHistory(userId: string, limit = 20) {
+  const { data } = await supabase
+    .from('conversation_history').select('role, content')
+    .eq('user_id', userId).order('ts', { ascending: false }).limit(limit);
+  return (data ?? []).reverse();
+}
+
+export async function appendConversation(userId: string, role: 'user' | 'assistant', content: string) {
+  await supabase.from('conversation_history').insert({ user_id: userId, role, content });
+  const { data: rows } = await supabase
+    .from('conversation_history').select('id').eq('user_id', userId)
+    .order('ts', { ascending: false }).range(100, 9999);
+  if (rows?.length) {
+    await supabase.from('conversation_history').delete()
+      .in('id', rows.map((r: { id: string }) => r.id));
+  }
+}
+
+// ── Push Subscriptions ─────────────────────────────────────────────────────
+
+export async function savePushSubscription(userId: string, subscription: object) {
+  const { error } = await supabase
+    .from('push_subscriptions')
+    .upsert({ user_id: userId, subscription, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+  if (error) throw error;
+}
+
+export async function getPushSubscriptions(userId: string) {
+  const { data, error } = await supabase
+    .from('push_subscriptions').select('*').eq('user_id', userId);
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function getDueReminders(userId: string) {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from('reminders').select('*').eq('user_id', userId).eq('fired', false)
+    .lte('remind_at', now);
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function markReminderFired(userId: string, reminderId: string) {
+  const { error } = await supabase
+    .from('reminders').update({ fired: true }).eq('id', reminderId).eq('user_id', userId);
+  if (error) throw error;
+}
+
+// ── Maya Memory ────────────────────────────────────────────────────────────
+
+export async function saveMemoryFacts(userId: string, facts: { fact: string; category: string }[]) {
+  if (!facts.length) return;
+  const rows = facts.map(f => ({ user_id: userId, fact: f.fact, category: f.category }));
+  await supabase.from('maya_memory').insert(rows);
+}
+
+export async function getMemoryFacts(userId: string, limit = 40) {
+  const { data } = await supabase
+    .from('maya_memory').select('fact, category')
+    .eq('user_id', userId).eq('active', true)
+    .order('updated_at', { ascending: false }).limit(limit);
+  return data ?? [];
+}
+
+// ── Evolution Log ──────────────────────────────────────────────────────────
+
+export async function getRecentConversations(userId: string, hours = 24) {
+  const since = new Date(Date.now() - hours * 3600000).toISOString();
+  const { data } = await supabase
+    .from('conversation_history').select('role, content, ts')
+    .eq('user_id', userId).gte('ts', since)
+    .order('ts', { ascending: true });
+  return data ?? [];
+}
+
+export async function saveEvolutionLog(entry: {
+  date: string;
+  gaps: unknown[];
+  new_facts: unknown[];
+  suggestions: unknown[];
+}) {
+  await supabase.from('maya_evolution_log')
+    .upsert(entry, { onConflict: 'date' });
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+
+export async function getDashboardData(userId: string) {
+  const [notes, reminders, workouts] = await Promise.all([
+    getRecentNotes(userId, 20),
+    listReminders(userId),
+    getRecentWorkouts(userId, 14),
+  ]);
+  return { notes, reminders, workouts };
+}

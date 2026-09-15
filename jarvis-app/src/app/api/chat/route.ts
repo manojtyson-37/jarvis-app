@@ -1,0 +1,446 @@
+import Groq from 'groq-sdk';
+import { NextRequest, NextResponse } from 'next/server';
+import { buildSystemPrompt } from '@/lib/context';
+import {
+  getConversationHistory, appendConversation,
+  saveNote, searchNotes, getRecentNotes, deleteNote,
+  saveReminder, listReminders, markReminderDone,
+  logWorkout, getRecentWorkouts,
+  logFinance, getFinanceSummary,
+  getMemoryFacts, saveMemoryFacts,
+} from '@/lib/supabase';
+import { parseReminderTime } from '@/lib/timeparser';
+
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+const TOOLS: Groq.Chat.ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'save_note',
+      description: 'Save a note or piece of information.',
+      parameters: { type: 'object', properties: { content: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } }, required: ['content'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_notes',
+      description: 'Search existing notes by keyword.',
+      parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_recent_notes',
+      description: 'Get the most recent notes.',
+      parameters: { type: 'object', properties: { limit: { type: 'number' } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_note',
+      description: 'Delete a note by its ID.',
+      parameters: { type: 'object', properties: { note_id: { type: 'string' } }, required: ['note_id'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_reminder',
+      description: 'Set a reminder. When: "in 2 hours", "tomorrow 9am", "friday 3pm".',
+      parameters: { type: 'object', properties: { text: { type: 'string' }, when: { type: 'string' } }, required: ['text', 'when'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_reminders',
+      description: 'List all upcoming (unfired) reminders.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mark_reminder_done',
+      description: 'Mark a reminder as done/dismissed by its ID.',
+      parameters: { type: 'object', properties: { reminder_id: { type: 'string' } }, required: ['reminder_id'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'log_workout',
+      description: 'Log a workout or fitness activity.',
+      parameters: { type: 'object', properties: { type: { type: 'string' }, duration_min: { type: 'number' }, notes: { type: 'string' } }, required: ['type'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_recent_workouts',
+      description: 'Get recent workout history.',
+      parameters: { type: 'object', properties: { days: { type: 'number' } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'log_expense',
+      description: 'Log an expense or purchase.',
+      parameters: { type: 'object', properties: { amount: { type: 'number' }, category: { type: 'string' }, description: { type: 'string' } }, required: ['amount'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'log_income',
+      description: 'Log income received.',
+      parameters: { type: 'object', properties: { amount: { type: 'number' }, category: { type: 'string' }, description: { type: 'string' } }, required: ['amount'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_finance_summary',
+      description: 'Get income/expense summary for the last N days.',
+      parameters: { type: 'object', properties: { days: { type: 'number' } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_morning_briefing',
+      description: 'Get a comprehensive morning briefing: upcoming reminders, recent notes, recent workouts.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web for current information, news, prices, events, or anything requiring up-to-date data.',
+      parameters: { type: 'object', properties: { query: { type: 'string', description: 'The search query' } }, required: ['query'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_url',
+      description: 'Fetch and read the content of any URL or webpage.',
+      parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_calendar_events',
+      description: 'Get upcoming Google Calendar events. Use when asked about schedule, meetings, calendar, or what\'s coming up.',
+      parameters: { type: 'object', properties: { days: { type: 'number', description: 'Number of days ahead to look (default 7)' } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_calendar_event',
+      description: 'Create a new event on Google Calendar.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          start: { type: 'string', description: 'ISO 8601 datetime e.g. 2026-09-16T09:00:00+05:30' },
+          end: { type: 'string', description: 'ISO 8601 datetime' },
+          description: { type: 'string' },
+        },
+        required: ['title', 'start', 'end'],
+      },
+    },
+  },
+];
+
+async function executeTool(name: string, args: Record<string, unknown>, userId: string): Promise<string> {
+  switch (name) {
+    case 'save_note':
+      await saveNote(userId, args.content as string, (args.tags as string[]) ?? []);
+      return 'Note saved.';
+
+    case 'search_notes': {
+      const notes = await searchNotes(userId, args.query as string);
+      if (!notes.length) return 'No matching notes.';
+      return notes.map((n: { id: string; content: string; created_at: string }) =>
+        `[${n.id}] ${n.content} (${new Date(n.created_at).toLocaleDateString('en-IN')})`
+      ).join('\n');
+    }
+
+    case 'get_recent_notes': {
+      const notes = await getRecentNotes(userId, (args.limit as number) ?? 5);
+      if (!notes.length) return 'No notes yet.';
+      return notes.map((n: { id: string; content: string; created_at: string }) =>
+        `[${n.id}] ${n.content} (${new Date(n.created_at).toLocaleDateString('en-IN')})`
+      ).join('\n');
+    }
+
+    case 'delete_note':
+      await deleteNote(userId, args.note_id as string);
+      return 'Note deleted.';
+
+    case 'set_reminder': {
+      const remindAt = parseReminderTime(args.when as string);
+      if (!remindAt) return `Could not parse "${args.when}". Try "in 2 hours" or "tomorrow 9am".`;
+      await saveReminder(userId, args.text as string, remindAt.toISOString());
+      return `Reminder set: "${args.text}" at ${remindAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST.`;
+    }
+
+    case 'list_reminders': {
+      const reminders = await listReminders(userId);
+      if (!reminders.length) return 'No upcoming reminders.';
+      const now = new Date();
+      return reminders.map((r: { id: string; text: string; remind_at: string }) => {
+        const t = new Date(r.remind_at);
+        const overdue = t < now ? ' ⚠️ overdue' : '';
+        return `[${r.id}] ${r.text} — ${t.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}${overdue}`;
+      }).join('\n');
+    }
+
+    case 'mark_reminder_done':
+      await markReminderDone(userId, args.reminder_id as string);
+      return 'Reminder marked done.';
+
+    case 'log_workout':
+      await logWorkout(userId, {
+        type: args.type, duration_min: args.duration_min ?? null,
+        notes: args.notes ?? '', logged_at: new Date().toISOString(),
+      });
+      return `Workout logged: ${args.type}${args.duration_min ? ` (${args.duration_min} min)` : ''}.`;
+
+    case 'get_recent_workouts': {
+      const logs = await getRecentWorkouts(userId, (args.days as number) ?? 7);
+      if (!logs.length) return 'No workouts logged recently.';
+      return logs.map((l: { logged_at: string; type: string; duration_min?: number; notes?: string }) => {
+        const d = new Date(l.logged_at).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
+        return `• ${d}: ${l.type}${l.duration_min ? ` ${l.duration_min}min` : ''}${l.notes ? ` — ${l.notes}` : ''}`;
+      }).join('\n');
+    }
+
+    case 'log_expense': {
+      await logFinance(userId, 'expense', args.amount as number, (args.category as string) ?? 'general', (args.description as string) ?? '');
+      return `Expense logged: ₹${args.amount}${args.category ? ` (${args.category})` : ''}.`;
+    }
+
+    case 'log_income': {
+      await logFinance(userId, 'income', args.amount as number, (args.category as string) ?? 'general', (args.description as string) ?? '');
+      return `Income logged: ₹${args.amount}${args.category ? ` (${args.category})` : ''}.`;
+    }
+
+    case 'get_finance_summary': {
+      const days = (args.days as number) ?? 30;
+      const { income, expense, net, logs } = await getFinanceSummary(userId, days);
+      const breakdown = logs.slice(0, 8).map((l: { type: string; amount: number; category: string; description: string; logged_at: string }) =>
+        `• ${l.type === 'income' ? '+' : '-'}₹${l.amount} ${l.category}${l.description ? ` — ${l.description}` : ''}`
+      ).join('\n');
+      return `Last ${days} days:\nIncome: ₹${income.toFixed(0)}\nExpenses: ₹${expense.toFixed(0)}\nNet: ₹${net.toFixed(0)}\n\n${breakdown}`;
+    }
+
+    case 'get_morning_briefing': {
+      const [reminders, notes, workouts] = await Promise.all([
+        listReminders(userId),
+        getRecentNotes(userId, 5),
+        getRecentWorkouts(userId, 7),
+      ]);
+      const now = new Date();
+      const upcoming = reminders.filter((r: { remind_at: string }) => new Date(r.remind_at) > now).slice(0, 5);
+      const overdue = reminders.filter((r: { remind_at: string }) => new Date(r.remind_at) <= now);
+      let brief = '';
+      if (overdue.length) brief += `**Overdue (${overdue.length}):** ${overdue.map((r: { text: string }) => r.text).join(', ')}\n`;
+      if (upcoming.length) brief += `**Upcoming:** ${upcoming.map((r: { text: string; remind_at: string }) => `${r.text} (${new Date(r.remind_at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })})`).join(', ')}\n`;
+      if (notes.length) brief += `**Recent notes:** ${notes.slice(0, 3).map((n: { content: string }) => n.content.slice(0, 50)).join(' | ')}\n`;
+      const wThisWeek = workouts.filter((w: { logged_at: string }) => new Date(w.logged_at) > new Date(Date.now() - 7 * 86400000));
+      if (wThisWeek.length) brief += `**Workouts this week:** ${wThisWeek.length} sessions`;
+      return brief || 'All clear — no reminders, notes, or recent activity.';
+    }
+
+    case 'web_search': {
+      const apiKey = process.env.TAVILY_API_KEY;
+      if (!apiKey) return 'Web search not configured (TAVILY_API_KEY missing).';
+      const res = await fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: apiKey, query: args.query, max_results: 5, search_depth: 'basic' }),
+      });
+      if (!res.ok) return `Search failed: ${res.status}`;
+      const data = await res.json() as { results: { title: string; url: string; content: string }[] };
+      if (!data.results?.length) return 'No results found.';
+      return data.results.slice(0, 4).map((r, i) =>
+        `${i + 1}. **${r.title}**\n${r.url}\n${r.content.slice(0, 300)}`
+      ).join('\n\n');
+    }
+
+    case 'read_url': {
+      const jinaUrl = `https://r.jina.ai/${args.url}`;
+      const res = await fetch(jinaUrl, { headers: { Accept: 'text/plain' } });
+      if (!res.ok) return `Failed to fetch URL: ${res.status}`;
+      const text = await res.text();
+      return text.slice(0, 3000);
+    }
+
+    case 'get_calendar_events': {
+      const token = await getGoogleAccessToken();
+      if (!token) return 'Google Calendar not configured.';
+      const days = (args.days as number) ?? 7;
+      const now = new Date();
+      const end = new Date(now.getTime() + days * 86400000);
+      const res = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now.toISOString()}&timeMax=${end.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=20`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!res.ok) return `Calendar fetch failed: ${res.status}`;
+      const data = await res.json() as { items: { summary: string; start: { dateTime?: string; date?: string }; end: { dateTime?: string; date?: string }; description?: string }[] };
+      if (!data.items?.length) return `No events in the next ${days} days.`;
+      return data.items.map(e => {
+        const start = e.start.dateTime ?? e.start.date ?? '';
+        const d = start ? new Date(start).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' }) : '';
+        return `• ${e.summary} — ${d}${e.description ? `\n  ${e.description.slice(0, 80)}` : ''}`;
+      }).join('\n');
+    }
+
+    case 'create_calendar_event': {
+      const token = await getGoogleAccessToken();
+      if (!token) return 'Google Calendar not configured.';
+      const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          summary: args.title,
+          description: args.description ?? '',
+          start: { dateTime: args.start, timeZone: 'Asia/Kolkata' },
+          end: { dateTime: args.end, timeZone: 'Asia/Kolkata' },
+        }),
+      });
+      if (!res.ok) return `Failed to create event: ${res.status}`;
+      const ev = await res.json() as { summary: string; htmlLink: string };
+      return `Event created: "${ev.summary}" — ${ev.htmlLink}`;
+    }
+
+    default:
+      return `Unknown tool: ${name}`;
+  }
+}
+
+async function getGoogleAccessToken(): Promise<string | null> {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) return null;
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }),
+  });
+  if (!res.ok) return null;
+  const data = await res.json() as { access_token?: string };
+  return data.access_token ?? null;
+}
+
+export async function POST(req: NextRequest) {
+  const { message } = await req.json();
+  const userId = 'manoj';
+
+  if (!message?.trim()) return NextResponse.json({ error: 'Empty message' }, { status: 400 });
+
+  const [history, memoryFacts] = await Promise.all([
+    getConversationHistory(userId),
+    getMemoryFacts(userId, 40),
+  ]);
+  await appendConversation(userId, 'user', message);
+
+  const messages: Groq.Chat.ChatCompletionMessageParam[] = [
+    ...history.map((h: { role: 'user' | 'assistant'; content: string }) => ({ role: h.role, content: h.content })),
+    { role: 'user', content: message },
+  ];
+
+  let response = await groq.chat.completions.create({
+    model: 'openai/gpt-oss-20b',
+    messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
+    tools: TOOLS,
+    tool_choice: 'auto',
+    max_tokens: 1024,
+  });
+
+  let turns = 0;
+  while (response.choices[0]?.finish_reason === 'tool_calls') {
+    if (++turns > 10) {
+      const fallback = 'I ran into too many steps — please try rephrasing.';
+      await appendConversation(userId, 'assistant', fallback);
+      return NextResponse.json({ reply: fallback });
+    }
+    const toolCalls = response.choices[0].message.tool_calls ?? [];
+    const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
+    for (const tc of toolCalls) {
+      let result: string;
+      try {
+        result = await executeTool(tc.function.name, JSON.parse(tc.function.arguments), userId);
+      } catch (e) {
+        result = `Tool error: ${(e as Error).message}`;
+      }
+      toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
+    }
+    messages.push({ role: 'assistant', content: response.choices[0].message.content ?? '', tool_calls: toolCalls });
+    messages.push(...toolResults);
+    response = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-20b',
+      messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
+      tools: TOOLS,
+      tool_choice: 'auto',
+      max_tokens: 1024,
+    });
+  }
+
+  let reply = response.choices[0]?.message?.content ?? '';
+
+  // ~35% chance to append a follow-up question (runs before return — Vercel serverless requirement)
+  if (Math.random() < 0.35 && reply.length < 500 && !reply.includes('?')) {
+    try {
+      const followUp = await generateFollowUpQuestion(userId, message, reply, memoryFacts);
+      if (followUp) reply = reply + '\n\n*Quick question:* ' + followUp;
+    } catch { /* silent */ }
+  }
+
+  await appendConversation(userId, 'assistant', reply);
+  return NextResponse.json({ reply });
+}
+
+async function generateFollowUpQuestion(
+  userId: string,
+  userMsg: string,
+  assistantMsg: string,
+  knownFacts: { fact: string; category: string }[]
+): Promise<string> {
+  const knownText = knownFacts.slice(0, 20).map(f => `• ${f.fact}`).join('\n');
+  const result = await groq.chat.completions.create({
+    model: 'openai/gpt-oss-20b',
+    messages: [{
+      role: 'system',
+      content: `You are Maya. Based on this conversation exchange, ask ONE short follow-up question to better understand the user.
+
+What you know about Manoj:
+${knownText || 'Not much yet.'}
+
+Rules:
+- Only ask if the exchange reveals a gap worth exploring
+- 1 sentence, conversational, genuinely curious
+- Output ONLY the question, or output SKIP if no good question exists`,
+    }, {
+      role: 'user',
+      content: `User said: ${userMsg}\nYou replied: ${assistantMsg}`,
+    }],
+    max_tokens: 60,
+  });
+  const q = result.choices[0]?.message?.content?.trim() ?? '';
+  if (!q || q.toUpperCase().startsWith('SKIP') || !q.includes('?')) return '';
+  // Log that we asked it
+  await saveMemoryFacts(userId, [{ fact: `Asked (in-chat): ${q}`, category: 'question' }]);
+  return q;
+}
