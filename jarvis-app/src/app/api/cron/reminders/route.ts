@@ -2,20 +2,23 @@ import { NextResponse } from 'next/server';
 import webpush from 'web-push';
 import { getDueReminders, markReminderFired, getPushSubscriptions } from '@/lib/supabase';
 
-webpush.setVapidDetails(
-  'mailto:kbdcreditsolutions@gmail.com',
-  process.env.VAPID_PUBLIC_KEY!,
-  process.env.VAPID_PRIVATE_KEY!
-);
-
 export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
-  // Verify cron secret to prevent public triggering
+  const secret = process.env.CRON_SECRET;
   const auth = req.headers ? new Headers(req.headers as unknown as HeadersInit).get('authorization') : null;
-  if (auth !== `Bearer ${process.env.CRON_SECRET}` && process.env.NODE_ENV !== 'development') {
+  if (!secret || auth !== `Bearer ${secret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+
+  if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+    return NextResponse.json({ error: 'VAPID not configured' }, { status: 500 });
+  }
+  webpush.setVapidDetails(
+    'mailto:kbdcreditsolutions@gmail.com',
+    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
 
   const userId = 'manoj';
   const [due, subs] = await Promise.all([
@@ -33,7 +36,7 @@ export async function GET(req: Request) {
       try {
         await webpush.sendNotification(
           sub.subscription as webpush.PushSubscription,
-          JSON.stringify({ title: '⏰ Maya Reminder', body: reminder.text, tag: reminder.id })
+          JSON.stringify({ title: '⏰ Maya Reminder', body: reminder.text, icon: '/icon-192.png', tag: reminder.id })
         );
       } catch (e) {
         console.error('Push failed for sub', sub.id, e);

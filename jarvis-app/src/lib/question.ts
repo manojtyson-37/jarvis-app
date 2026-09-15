@@ -30,7 +30,7 @@ export async function generateAndPushQuestion(userId: string): Promise<{ questio
   const knownText = knownFacts.map(f => `• [${f.category}] ${f.fact}`).join('\n');
   const askedQuestions = knownFacts
     .filter(f => f.category === 'question')
-    .map(f => f.fact.replace('Asked: ', ''));
+    .map(f => f.fact.replace(/^Asked(?: \(in-chat\))?: /, ''));
 
   const area = QUESTION_AREAS[Math.floor(Math.random() * QUESTION_AREAS.length)];
 

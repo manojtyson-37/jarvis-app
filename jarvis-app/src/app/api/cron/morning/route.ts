@@ -5,12 +5,6 @@ import {
   getRecentWorkouts, getFinanceSummary, getPushSubscriptions,
 } from '@/lib/supabase';
 
-webpush.setVapidDetails(
-  'mailto:kbdcreditsolutions@gmail.com',
-  process.env.VAPID_PUBLIC_KEY!,
-  process.env.VAPID_PRIVATE_KEY!
-);
-
 export const runtime = 'nodejs';
 
 const USER_ID = 'manoj';
@@ -20,10 +14,19 @@ function istHour(): number {
 }
 
 export async function GET(req: Request) {
+  const secret = process.env.CRON_SECRET;
   const auth = (req.headers as unknown as Headers).get('authorization');
-  if (auth !== `Bearer ${process.env.CRON_SECRET}` && process.env.NODE_ENV !== 'development') {
+  if (!secret || auth !== `Bearer ${secret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+    return NextResponse.json({ error: 'VAPID not configured' }, { status: 500 });
+  }
+  webpush.setVapidDetails(
+    'mailto:kbdcreditsolutions@gmail.com',
+    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
 
   // Only fire between 7:00–7:05 IST
   const hour = istHour();

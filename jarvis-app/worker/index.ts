@@ -6,11 +6,12 @@ const sw = self as any;
 
 sw.addEventListener('push', (event: any) => {
   if (!event.data) return;
-  const data = event.data.json();
+  let data: any = {};
+  try { data = event.data.json(); } catch { /* malformed payload — show fallback */ }
   event.waitUntil(
     sw.registration.showNotification(data.title ?? '⏰ Maya', {
       body: data.body ?? '',
-      icon: '/icons/icon-192x192.png',
+      icon: '/icon-192.png',
       tag: data.tag ?? 'maya-reminder',
       requireInteraction: true,
       vibrate: [200, 100, 200],

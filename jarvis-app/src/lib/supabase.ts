@@ -119,20 +119,24 @@ export async function getFinanceSummary(userId: string, days = 30) {
 // ── Conversation ───────────────────────────────────────────────────────────
 
 export async function getConversationHistory(userId: string, limit = 20) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('conversation_history').select('role, content')
     .eq('user_id', userId).order('ts', { ascending: false }).limit(limit);
+  if (error) console.error('getConversationHistory error:', error.message);
   return (data ?? []).reverse();
 }
 
 export async function appendConversation(userId: string, role: 'user' | 'assistant', content: string) {
   await supabase.from('conversation_history').insert({ user_id: userId, role, content });
-  const { data: rows } = await supabase
+  // Prune: keep only the 100 most recent rows
+  const { data: keep } = await supabase
     .from('conversation_history').select('id').eq('user_id', userId)
-    .order('ts', { ascending: false }).range(100, 9999);
-  if (rows?.length) {
+    .order('ts', { ascending: false }).limit(100);
+  if (keep?.length === 100) {
+    const oldestKeptTs = keep[keep.length - 1];
     await supabase.from('conversation_history').delete()
-      .in('id', rows.map((r: { id: string }) => r.id));
+      .eq('user_id', userId).not('id', 'in', `(${keep.map((r: { id: string }) => r.id).join(',')})`);
+    void oldestKeptTs; // suppress unused var warning
   }
 }
 
@@ -172,14 +176,16 @@ export async function markReminderFired(userId: string, reminderId: string) {
 export async function saveMemoryFacts(userId: string, facts: { fact: string; category: string }[]) {
   if (!facts.length) return;
   const rows = facts.map(f => ({ user_id: userId, fact: f.fact, category: f.category }));
-  await supabase.from('maya_memory').insert(rows);
+  const { error } = await supabase.from('maya_memory').insert(rows);
+  if (error) throw error;
 }
 
 export async function getMemoryFacts(userId: string, limit = 40) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('maya_memory').select('fact, category')
     .eq('user_id', userId).eq('active', true)
     .order('updated_at', { ascending: false }).limit(limit);
+  if (error) console.error('getMemoryFacts error:', error.message);
   return data ?? [];
 }
 
@@ -187,10 +193,11 @@ export async function getMemoryFacts(userId: string, limit = 40) {
 
 export async function getRecentConversations(userId: string, hours = 24) {
   const since = new Date(Date.now() - hours * 3600000).toISOString();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('conversation_history').select('role, content, ts')
     .eq('user_id', userId).gte('ts', since)
     .order('ts', { ascending: true });
+  if (error) console.error('getRecentConversations error:', error.message);
   return data ?? [];
 }
 
