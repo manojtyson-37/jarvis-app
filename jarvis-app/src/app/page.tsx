@@ -74,12 +74,16 @@ export default function MayaPage() {
       .then(r => r.json())
       .then(({ history }) => {
         if (!history?.length) return;
-        setMessages(history.map((h: { role: 'user' | 'assistant'; content: string; ts: string }) => ({
-          id: crypto.randomUUID(),
-          role: h.role,
-          content: h.content,
-          ts: new Date(h.ts),
-        })));
+        setMessages(
+          history
+            .filter((h: { content: string }) => h.content?.trim())
+            .map((h: { role: 'user' | 'assistant'; content: string; ts: string }) => ({
+              id: crypto.randomUUID(),
+              role: h.role,
+              content: h.content,
+              ts: new Date(h.ts),
+            }))
+        );
       })
       .catch(() => { /* silent — fresh start on error */ });
   }, []);

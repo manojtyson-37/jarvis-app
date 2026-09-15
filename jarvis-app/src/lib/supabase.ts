@@ -121,7 +121,7 @@ export async function getFinanceSummary(userId: string, days = 30) {
 export async function getConversationHistory(userId: string, limit = 20) {
   const { data, error } = await supabase
     .from('conversation_history').select('role, content, ts')
-    .eq('user_id', userId).order('ts', { ascending: false }).limit(limit);
+    .eq('user_id', userId).neq('content', '').order('ts', { ascending: false }).limit(limit);
   if (error) console.error('getConversationHistory error:', error.message);
   return (data ?? []).reverse();
 }
