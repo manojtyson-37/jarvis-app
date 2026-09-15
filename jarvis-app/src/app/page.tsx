@@ -188,43 +188,46 @@ export default function MayaPage() {
     setTranscript('');
     transcriptRef.current = '';
 
-    // Persists across auto-restarts so finalized segments aren't lost
+    // Accumulates final text across sessions (continuous:false restarts)
     let accumulatedFinal = '';
+    // Interim from current session
+    let currentInterim = '';
 
     const launch = () => {
-      // Resets each recognition session — tracks which results are already finalized
-      let lastFinalIndex = 0;
-
       const recognition = new SpeechRecognition();
       recognition.lang = 'en-IN';
-      recognition.continuous = true;
+      // continuous:false — each session = one clean utterance, no overlap on restart
+      recognition.continuous = false;
       recognition.interimResults = true;
+      currentInterim = '';
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onresult = (e: any) => {
-        // Start from lastFinalIndex (not e.resultIndex — Chrome Android resets it unreliably)
         let interim = '';
-        for (let i = lastFinalIndex; i < e.results.length; i++) {
-          const chunk = e.results[i][0].transcript as string;
+        for (let i = 0; i < e.results.length; i++) {
           if (e.results[i].isFinal) {
-            accumulatedFinal += chunk + ' ';
-            lastFinalIndex = i + 1; // never re-process this result
+            accumulatedFinal += e.results[i][0].transcript as string + ' ';
+            interim = '';
           } else {
-            interim = chunk; // only last interim matters
+            interim = e.results[i][0].transcript as string;
           }
         }
+        currentInterim = interim;
         const full = (accumulatedFinal + interim).trim();
         setTranscript(full);
         transcriptRef.current = full;
       };
+
       recognition.onend = () => {
+        currentInterim = '';
         if (shouldListenRef.current) {
-          // browser timed out — restart silently, carry accumulated finals
+          // Restart immediately for next utterance
           try { launch(); } catch { /* give up */ }
         }
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onerror = (e: any) => {
-        if (e.error === 'aborted') return;
+        if (e.error === 'aborted' || e.error === 'no-speech') return;
         shouldListenRef.current = false;
         setListening(false);
       };
