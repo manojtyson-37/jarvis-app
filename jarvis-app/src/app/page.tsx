@@ -188,7 +188,8 @@ export default function MayaPage() {
     setTranscript('');
     transcriptRef.current = '';
 
-    const launch = (SpeechRecognitionCtor: new () => SpeechRecognition) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const launch = (SpeechRecognitionCtor: new () => any) => {
       const recognition = new SpeechRecognitionCtor();
       recognition.lang = 'en-IN';
       recognition.continuous = false;
@@ -227,7 +228,8 @@ export default function MayaPage() {
       recognitionRef.current = { stop: () => recognition.abort() };
       recognition.start();
     };
-    launch(SpeechRecognition as unknown as new () => SpeechRecognition);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    launch(SpeechRecognition as unknown as new () => any);
   }, []);
 
   async function logout() {
