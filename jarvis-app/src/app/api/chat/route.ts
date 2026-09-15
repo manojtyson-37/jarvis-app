@@ -334,18 +334,20 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
         }),
       });
       if (!res.ok) return `Failed to create event: ${res.status}`;
-      const ev = await res.json() as { id: string; summary: string; htmlLink: string };
-      return `Event created: "${ev.summary}" (id: ${ev.id}) — ${ev.htmlLink}`;
+      const ev = await res.json() as { id?: string; summary: string; htmlLink: string };
+      return `Event created: "${ev.summary}" (id: ${ev.id ?? '(unavailable)'}) — ${ev.htmlLink}`;
     }
 
     case 'delete_calendar_event': {
+      if (!args.event_id) return 'event_id is required to delete an event.';
       const token = await getGoogleAccessToken();
       if (!token) return 'Google Calendar not configured.';
       const res = await fetch(
         `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(args.event_id as string)}`,
         { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
       );
-      if (res.status === 204 || res.ok) return 'Event deleted.';
+      if (res.ok) return 'Event deleted.';
+      if (res.status === 404 || res.status === 410) return 'Event not found — it may have already been deleted.';
       return `Failed to delete event: ${res.status}`;
     }
 
