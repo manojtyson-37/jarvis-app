@@ -431,10 +431,11 @@ export async function POST(req: NextRequest) {
   }
 
   let reply = response.choices[0]?.message?.content ?? '';
-  // Guard against model stuttering (e.g. "Done.Done." or "Removed.Removed.")
-  const half = reply.slice(0, Math.floor(reply.length / 2));
-  if (half.length > 2 && half + half === reply) reply = half;
   reply = reply.trim();
+  // Dedup: catch exact repeats with optional whitespace between ("Done. Done." or "Done.Done.")
+  reply = reply.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
+  // Fallback for empty model response
+  if (!reply) reply = 'Something went wrong on my end. Try again.';
 
   // ~35% chance to append a follow-up question (runs before return — Vercel serverless requirement)
   if (Math.random() < 0.35 && reply.length < 500 && !reply.includes('?')) {
