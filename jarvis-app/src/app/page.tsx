@@ -68,6 +68,22 @@ export default function MayaPage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
 
+  // Load conversation history on mount
+  useEffect(() => {
+    fetch('/api/chat')
+      .then(r => r.json())
+      .then(({ history }) => {
+        if (!history?.length) return;
+        setMessages(history.map((h: { role: 'user' | 'assistant'; content: string; ts: string }) => ({
+          id: crypto.randomUUID(),
+          role: h.role,
+          content: h.content,
+          ts: new Date(h.ts),
+        })));
+      })
+      .catch(() => { /* silent — fresh start on error */ });
+  }, []);
+
   // Listen for prefill messages from service worker (question notifications)
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
@@ -176,20 +192,24 @@ export default function MayaPage() {
     let accumulatedFinal = '';
 
     const launch = () => {
+      // Resets each recognition session — tracks which results are already finalized
+      let lastFinalIndex = 0;
+
       const recognition = new SpeechRecognition();
       recognition.lang = 'en-IN';
       recognition.continuous = true;
       recognition.interimResults = true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onresult = (e: any) => {
-        // Only process newly added/updated results starting at e.resultIndex
+        // Start from lastFinalIndex (not e.resultIndex — Chrome Android resets it unreliably)
         let interim = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
+        for (let i = lastFinalIndex; i < e.results.length; i++) {
           const chunk = e.results[i][0].transcript as string;
           if (e.results[i].isFinal) {
             accumulatedFinal += chunk + ' ';
+            lastFinalIndex = i + 1; // never re-process this result
           } else {
-            interim = chunk;
+            interim = chunk; // only last interim matters
           }
         }
         const full = (accumulatedFinal + interim).trim();

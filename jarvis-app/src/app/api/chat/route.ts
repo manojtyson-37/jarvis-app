@@ -371,6 +371,11 @@ async function getGoogleAccessToken(): Promise<string | null> {
   return data.access_token ?? null;
 }
 
+export async function GET() {
+  const history = await getConversationHistory('manoj', 40);
+  return NextResponse.json({ history });
+}
+
 export async function POST(req: NextRequest) {
   const { message } = await req.json();
   const userId = 'manoj';
