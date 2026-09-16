@@ -128,15 +128,17 @@ export async function getConversationHistory(userId: string, limit = 20) {
 
 export async function appendConversation(userId: string, role: 'user' | 'assistant', content: string) {
   await supabase.from('conversation_history').insert({ user_id: userId, role, content });
-  // Prune: keep only the 100 most recent rows
+  // Fire-and-forget prune — never blocks the response path
+  pruneConversation(userId).catch(() => {});
+}
+
+async function pruneConversation(userId: string) {
   const { data: keep } = await supabase
     .from('conversation_history').select('id').eq('user_id', userId)
     .order('ts', { ascending: false }).limit(100);
-  if (keep?.length === 100) {
-    const oldestKeptTs = keep[keep.length - 1];
+  if ((keep?.length ?? 0) >= 100) {
     await supabase.from('conversation_history').delete()
-      .eq('user_id', userId).not('id', 'in', `(${keep.map((r: { id: string }) => r.id).join(',')})`);
-    void oldestKeptTs; // suppress unused var warning
+      .eq('user_id', userId).not('id', 'in', `(${keep!.map((r: { id: string }) => r.id).join(',')})`);
   }
 }
 
