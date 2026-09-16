@@ -443,7 +443,7 @@ export async function POST(req: NextRequest) {
         model: 'openai/gpt-oss-20b',
         messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
         tools: TOOLS,
-        tool_choice: 'none',
+        tool_choice: 'auto',
         max_tokens: 400,
       });
     } catch (e) {
