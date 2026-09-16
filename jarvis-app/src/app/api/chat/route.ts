@@ -7,7 +7,7 @@ import {
   saveReminder, listReminders, markReminderDone,
   logWorkout, getRecentWorkouts,
   logFinance, getFinanceSummary,
-  getMemoryFacts, saveMemoryFacts,
+  getMemoryFacts,
 } from '@/lib/supabase';
 import { parseReminderTime } from '@/lib/timeparser';
 
@@ -361,14 +361,22 @@ async function getGoogleAccessToken(): Promise<string | null> {
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
   if (!clientId || !clientSecret || !refreshToken) return null;
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }),
-  });
-  if (!res.ok) return null;
-  const data = await res.json() as { access_token?: string };
-  return data.access_token ?? null;
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }),
+    });
+    if (!res.ok) {
+      console.error('Google token refresh failed:', res.status, await res.text());
+      return null;
+    }
+    const data = await res.json() as { access_token?: string };
+    return data.access_token ?? null;
+  } catch (e) {
+    console.error('Google token fetch error:', (e as Error).message);
+    return null;
+  }
 }
 
 export async function GET() {
@@ -383,8 +391,8 @@ export async function POST(req: NextRequest) {
   if (!message?.trim()) return NextResponse.json({ error: 'Empty message' }, { status: 400 });
 
   const [history, memoryFacts] = await Promise.all([
-    getConversationHistory(userId),
-    getMemoryFacts(userId, 40),
+    getConversationHistory(userId, 10),
+    getMemoryFacts(userId, 20),
   ]);
   await appendConversation(userId, 'user', message);
 
@@ -393,18 +401,27 @@ export async function POST(req: NextRequest) {
     { role: 'user', content: message },
   ];
 
-  let response = await groq.chat.completions.create({
-    model: 'openai/gpt-oss-20b',
-    messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
-    tools: TOOLS,
-    tool_choice: 'auto',
-    max_tokens: 1024,
-  });
+  let response: Groq.Chat.ChatCompletion;
+  try {
+    response = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-20b',
+      messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
+      tools: TOOLS,
+      tool_choice: 'auto',
+      max_tokens: 400,
+    });
+  } catch (e) {
+    const errMsg = (e as Error).message ?? 'Groq error';
+    console.error('Groq initial call failed:', errMsg);
+    const reply = 'Hit a snag — try again in a moment.';
+    await appendConversation(userId, 'assistant', reply);
+    return NextResponse.json({ reply });
+  }
 
   let turns = 0;
   while (response.choices[0]?.finish_reason === 'tool_calls') {
-    if (++turns > 10) {
-      const fallback = 'I ran into too many steps — please try rephrasing.';
+    if (++turns > 5) {
+      const fallback = 'Took too many steps — try rephrasing.';
       await appendConversation(userId, 'assistant', fallback);
       return NextResponse.json({ reply: fallback });
     }
@@ -421,63 +438,27 @@ export async function POST(req: NextRequest) {
     }
     messages.push({ role: 'assistant', content: response.choices[0].message.content ?? '', tool_calls: toolCalls });
     messages.push(...toolResults);
-    response = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-20b',
-      messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
-      tools: TOOLS,
-      tool_choice: 'auto',
-      max_tokens: 1024,
-    });
+    try {
+      response = await groq.chat.completions.create({
+        model: 'openai/gpt-oss-20b',
+        messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
+        tools: TOOLS,
+        tool_choice: 'none',
+        max_tokens: 400,
+      });
+    } catch (e) {
+      console.error('Groq tool-result call failed:', (e as Error).message);
+      const reply = 'Done — hit a snag composing the reply though.';
+      await appendConversation(userId, 'assistant', reply);
+      return NextResponse.json({ reply });
+    }
   }
 
   let reply = response.choices[0]?.message?.content ?? '';
   reply = reply.trim();
-  // Dedup: catch exact repeats with optional whitespace between ("Done. Done." or "Done.Done.")
   reply = reply.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
-  // Fallback for empty model response
   if (!reply) reply = 'Something went wrong on my end. Try again.';
-
-  // ~35% chance to append a follow-up question (runs before return — Vercel serverless requirement)
-  if (Math.random() < 0.35 && reply.length < 500 && !reply.includes('?')) {
-    try {
-      const followUp = await generateFollowUpQuestion(userId, message, reply, memoryFacts);
-      if (followUp) reply = reply + '\n\n*Quick question:* ' + followUp;
-    } catch { /* silent */ }
-  }
 
   await appendConversation(userId, 'assistant', reply);
   return NextResponse.json({ reply });
-}
-
-async function generateFollowUpQuestion(
-  userId: string,
-  userMsg: string,
-  assistantMsg: string,
-  knownFacts: { fact: string; category: string }[]
-): Promise<string> {
-  const knownText = knownFacts.slice(0, 20).map(f => `• ${f.fact}`).join('\n');
-  const result = await groq.chat.completions.create({
-    model: 'openai/gpt-oss-20b',
-    messages: [{
-      role: 'system',
-      content: `You are Maya. Based on this conversation exchange, ask ONE short follow-up question to better understand the user.
-
-What you know about Manoj:
-${knownText || 'Not much yet.'}
-
-Rules:
-- Only ask if the exchange reveals a gap worth exploring
-- 1 sentence, conversational, genuinely curious
-- Output ONLY the question, or output SKIP if no good question exists`,
-    }, {
-      role: 'user',
-      content: `User said: ${userMsg}\nYou replied: ${assistantMsg}`,
-    }],
-    max_tokens: 60,
-  });
-  const q = result.choices[0]?.message?.content?.trim() ?? '';
-  if (!q || q.toUpperCase().startsWith('SKIP') || !q.includes('?')) return '';
-  // Log that we asked it
-  await saveMemoryFacts(userId, [{ fact: `Asked (in-chat): ${q}`, category: 'question' }]);
-  return q;
 }

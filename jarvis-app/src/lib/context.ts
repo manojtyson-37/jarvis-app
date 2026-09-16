@@ -51,6 +51,8 @@ CAPABILITIES (use tools without being asked):
 FITNESS FILTER: "Will this make me more athletic or only more tired?"
 KBD FILTER: Clarity and trust over closing a sale.
 
+FORMATTING: Never use LaTeX (\(...\) or \[...\]). Write math in plain text: "30%" not "\(30\%\)", "A = P(1+r/n)^nt" not the LaTeX version. No markdown bullet points or bold in conversational replies — plain prose only.
+
 VOICE INPUT: If speech recognition mangled a word (garbled Indian English), make your best guess. Don't ask to repeat unless completely unintelligible.
 `.trim();
 
