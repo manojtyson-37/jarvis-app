@@ -152,17 +152,59 @@ export default function MayaPage() {
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setLoading(true);
+
+    const assistantId = crypto.randomUUID();
+    setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '', ts: new Date() }]);
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text.trim() }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `Error ${res.status}`);
-      setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: data.reply, ts: new Date() }]);
+      if (!res.ok || !res.body) {
+        const errText = await res.text().catch(() => `Error ${res.status}`);
+        throw new Error(errText);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullContent = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';
+
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          const data = part.slice(6).trim();
+          if (data === '[DONE]') break;
+          try {
+            const { chunk } = JSON.parse(data) as { chunk: string };
+            if (chunk) {
+              fullContent += chunk;
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId ? { ...m, content: fullContent } : m
+              ));
+            }
+          } catch { /* ignore malformed SSE chunks */ }
+        }
+      }
+
+      if (!fullContent.trim()) {
+        setMessages(prev => prev.map(m =>
+          m.id === assistantId ? { ...m, content: 'Something went wrong. Try again.' } : m
+        ));
+      }
     } catch (e) {
-      setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: `Error: ${(e as Error).message}`, ts: new Date() }]);
+      setMessages(prev => prev.map(m =>
+        m.id === assistantId ? { ...m, content: `Error: ${(e as Error).message}` } : m
+      ));
     } finally {
       setLoading(false);
     }
@@ -299,8 +341,14 @@ export default function MayaPage() {
                       : 'bg-zinc-800 text-zinc-100 rounded-bl-sm'
                   }`}>
                     {m.role === 'assistant'
-                      ? <div className="prose prose-invert prose-sm max-w-none"
-                          dangerouslySetInnerHTML={{ __html: renderMd(m.content) }} />
+                      ? m.content
+                        ? <div className="prose prose-invert prose-sm max-w-none"
+                            dangerouslySetInnerHTML={{ __html: renderMd(m.content) }} />
+                        : <div className="flex gap-1 items-center py-0.5">
+                            <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full dot-1" />
+                            <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full dot-2" />
+                            <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full dot-3" />
+                          </div>
                       : <p className="whitespace-pre-wrap">{m.content}</p>
                     }
                     <p className={`text-[10px] mt-1 ${m.role === 'user' ? 'text-blue-300' : 'text-zinc-500'}`}>
@@ -309,15 +357,6 @@ export default function MayaPage() {
                   </div>
                 </div>
               ))}
-              {loading && (
-                <div className="flex justify-start">
-                  <div className="bg-zinc-800 rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1 items-center">
-                    <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full dot-1" />
-                    <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full dot-2" />
-                    <span className="w-1.5 h-1.5 bg-zinc-400 rounded-full dot-3" />
-                  </div>
-                </div>
-              )}
               <div ref={bottomRef} />
             </div>
 

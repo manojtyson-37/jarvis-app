@@ -386,6 +386,12 @@ export async function GET() {
   return NextResponse.json({ history });
 }
 
+// Tools that confirm an action — skip the 2nd Groq call
+const FAST_CONFIRM_TOOLS = new Set([
+  'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
+  'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
+]);
+
 export async function POST(req: NextRequest) {
   const { message } = await req.json();
   const userId = 'manoj';
@@ -398,85 +404,123 @@ export async function POST(req: NextRequest) {
   ]);
   await appendConversation(userId, 'user', message);
 
-  const messages: Groq.Chat.ChatCompletionMessageParam[] = [
-    ...history.map((h: { role: 'user' | 'assistant'; content: string }) => ({ role: h.role, content: h.content })),
-    { role: 'user', content: message },
-  ];
+  const encoder = new TextEncoder();
+  const sseChunk = (text: string) => encoder.encode(`data: ${JSON.stringify({ chunk: text })}\n\n`);
+  const sseDone = () => encoder.encode('data: [DONE]\n\n');
 
-  let response: Groq.Chat.ChatCompletion;
-  try {
-    response = await groq.chat.completions.create({
-      model: 'qwen/qwen3.8-27b',
-      messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
-      tools: TOOLS,
-      tool_choice: 'auto',
-      max_tokens: 400,
-    });
-  } catch (e) {
-    const errMsg = (e as Error).message ?? 'Groq error';
-    console.error('Groq initial call failed:', errMsg);
-    const reply = 'Hit a snag — try again in a moment.';
-    await appendConversation(userId, 'assistant', reply);
-    return NextResponse.json({ reply });
-  }
+  const readable = new ReadableStream({
+    async start(controller) {
+      const emit = (text: string) => controller.enqueue(sseChunk(text));
+      const finish = async (reply: string) => {
+        let r = reply.trim();
+        r = r.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
+        if (!r) r = 'Something went wrong on my end. Try again.';
+        await appendConversation(userId, 'assistant', r);
+        emit(r);
+        controller.enqueue(sseDone());
+        controller.close();
+      };
 
-  // Tools that just confirm an action — return their result directly without a 2nd Groq call
-  const FAST_CONFIRM_TOOLS = new Set([
-    'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
-    'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
-  ]);
+      const msgs: Groq.Chat.ChatCompletionMessageParam[] = [
+        ...history.map((h: { role: 'user' | 'assistant'; content: string }) => ({ role: h.role, content: h.content })),
+        { role: 'user', content: message },
+      ];
 
-  let turns = 0;
-  while (response.choices[0]?.finish_reason === 'tool_calls') {
-    if (++turns > 5) {
-      const fallback = 'Took too many steps — try rephrasing.';
-      await appendConversation(userId, 'assistant', fallback);
-      return NextResponse.json({ reply: fallback });
-    }
-    const toolCalls = response.choices[0].message.tool_calls ?? [];
-    const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
-    const fastResults: string[] = [];
-    for (const tc of toolCalls) {
-      let result: string;
+      let response: Groq.Chat.ChatCompletion;
       try {
-        result = await executeTool(tc.function.name, JSON.parse(tc.function.arguments), userId);
+        response = await groq.chat.completions.create({
+          model: 'qwen/qwen3.8-27b',
+          messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
+          tools: TOOLS,
+          tool_choice: 'auto',
+          max_tokens: 400,
+        });
       } catch (e) {
-        result = `Tool error: ${(e as Error).message}`;
+        console.error('Groq initial call failed:', (e as Error).message);
+        await finish('Hit a snag — try again in a moment.');
+        return;
       }
-      toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
-      if (FAST_CONFIRM_TOOLS.has(tc.function.name)) fastResults.push(result);
-    }
 
-    // If ALL tool calls are fast-confirm types, skip the 2nd Groq call
-    if (fastResults.length === toolCalls.length && fastResults.length > 0) {
-      const reply = fastResults.join(' ');
-      await appendConversation(userId, 'assistant', reply);
-      return NextResponse.json({ reply });
-    }
+      let turns = 0;
+      while (response.choices[0]?.finish_reason === 'tool_calls') {
+        if (++turns > 5) {
+          await finish('Took too many steps — try rephrasing.');
+          return;
+        }
+        const toolCalls = response.choices[0].message.tool_calls ?? [];
+        const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
+        const fastResults: string[] = [];
 
-    messages.push({ role: 'assistant', content: response.choices[0].message.content ?? '', tool_calls: toolCalls });
-    messages.push(...toolResults);
-    try {
-      response = await groq.chat.completions.create({
-        model: 'qwen/qwen3.8-27b',
-        messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
-        tools: TOOLS,
-        tool_choice: 'auto',
-        max_tokens: 400,
-      });
-    } catch (e) {
-      console.error('Groq tool-result call failed:', (e as Error).message);
-      const reply = 'Done, but had trouble composing the response. Try asking again.';
-      await appendConversation(userId, 'assistant', reply);
-      return NextResponse.json({ reply });
-    }
-  }
+        for (const tc of toolCalls) {
+          let result: string;
+          try {
+            result = await executeTool(tc.function.name, JSON.parse(tc.function.arguments), userId);
+          } catch (e) {
+            result = `Tool error: ${(e as Error).message}`;
+          }
+          toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
+          if (FAST_CONFIRM_TOOLS.has(tc.function.name)) fastResults.push(result);
+        }
 
-  let reply = response.choices[0]?.message?.content ?? '';
-  reply = reply.trim();
-  reply = reply.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
-  if (!reply) reply = 'Something went wrong on my end. Try again.';
+        // All fast-confirm — skip 2nd Groq call
+        if (fastResults.length === toolCalls.length && fastResults.length > 0) {
+          const reply = fastResults.join(' ');
+          await appendConversation(userId, 'assistant', reply);
+          emit(reply);
+          controller.enqueue(sseDone());
+          controller.close();
+          return;
+        }
 
-  await appendConversation(userId, 'assistant', reply);
-  return NextResponse.json({ reply });
+        msgs.push({ role: 'assistant', content: response.choices[0].message.content ?? '', tool_calls: toolCalls });
+        msgs.push(...toolResults);
+
+        // Stream the post-tool response
+        try {
+          const groqStream = await groq.chat.completions.create({
+            model: 'qwen/qwen3.8-27b',
+            messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
+            tools: TOOLS,
+            tool_choice: 'auto',
+            max_tokens: 600,
+            stream: true,
+          });
+
+          let fullReply = '';
+          for await (const chunk of groqStream) {
+            const text = chunk.choices[0]?.delta?.content ?? '';
+            if (text) {
+              fullReply += text;
+              controller.enqueue(sseChunk(text));
+            }
+          }
+
+          fullReply = fullReply.trim();
+          fullReply = fullReply.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
+          if (!fullReply) fullReply = 'Something went wrong on my end. Try again.';
+          await appendConversation(userId, 'assistant', fullReply);
+          controller.enqueue(sseDone());
+          controller.close();
+          return;
+        } catch (e) {
+          console.error('Groq stream (post-tool) failed:', (e as Error).message);
+          await finish('Done, but had trouble composing the response. Try asking again.');
+          return;
+        }
+      }
+
+      // No tools: direct answer already in response
+      const reply = response.choices[0]?.message?.content ?? '';
+      await finish(reply);
+    },
+  });
+
+  return new Response(readable, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    },
+  });
 }
