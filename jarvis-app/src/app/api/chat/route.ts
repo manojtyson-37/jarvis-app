@@ -179,7 +179,7 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
   switch (name) {
     case 'save_note':
       await saveNote(userId, args.content as string, (args.tags as string[]) ?? []);
-      return 'Note saved.';
+      return 'Saved.';
 
     case 'search_notes': {
       const notes = await searchNotes(userId, args.query as string);
@@ -203,9 +203,10 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
 
     case 'set_reminder': {
       const remindAt = parseReminderTime(args.when as string);
-      if (!remindAt) return `Could not parse "${args.when}". Try "in 2 hours" or "tomorrow 9am".`;
+      if (!remindAt) return `Couldn't parse "${args.when}" — try "in 2 hours" or "tomorrow 9am".`;
       await saveReminder(userId, args.text as string, remindAt.toISOString());
-      return `Reminder set: "${args.text}" at ${remindAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST.`;
+      const timeStr = remindAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' });
+      return `Done — ${args.text} at ${timeStr}.`;
     }
 
     case 'list_reminders': {
@@ -222,7 +223,7 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
 
     case 'mark_reminder_done':
       await markReminderDone(userId, args.reminder_id as string);
-      return 'ok';
+      return 'Reminder removed.';
 
     case 'log_workout':
       await logWorkout(userId, {
@@ -419,6 +420,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ reply });
   }
 
+  // Tools that just confirm an action — return their result directly without a 2nd Groq call
+  const FAST_CONFIRM_TOOLS = new Set([
+    'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
+    'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
+  ]);
+
   let turns = 0;
   while (response.choices[0]?.finish_reason === 'tool_calls') {
     if (++turns > 5) {
@@ -428,6 +435,7 @@ export async function POST(req: NextRequest) {
     }
     const toolCalls = response.choices[0].message.tool_calls ?? [];
     const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
+    const fastResults: string[] = [];
     for (const tc of toolCalls) {
       let result: string;
       try {
@@ -436,7 +444,16 @@ export async function POST(req: NextRequest) {
         result = `Tool error: ${(e as Error).message}`;
       }
       toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
+      if (FAST_CONFIRM_TOOLS.has(tc.function.name)) fastResults.push(result);
     }
+
+    // If ALL tool calls are fast-confirm types, skip the 2nd Groq call
+    if (fastResults.length === toolCalls.length && fastResults.length > 0) {
+      const reply = fastResults.join(' ');
+      await appendConversation(userId, 'assistant', reply);
+      return NextResponse.json({ reply });
+    }
+
     messages.push({ role: 'assistant', content: response.choices[0].message.content ?? '', tool_calls: toolCalls });
     messages.push(...toolResults);
     try {
