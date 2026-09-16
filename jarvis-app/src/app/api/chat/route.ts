@@ -214,8 +214,9 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
       const now = new Date();
       return reminders.map((r: { id: string; text: string; remind_at: string }) => {
         const t = new Date(r.remind_at);
-        const overdue = t < now ? ' ⚠️ overdue' : '';
-        return `[${r.id}] ${r.text} — ${t.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}${overdue}`;
+        const timeStr = t.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' });
+        const overdue = t < now ? ' [overdue]' : '';
+        return `• ${r.text} — ${timeStr}${overdue} (id:${r.id})`;
       }).join('\n');
     }
 
@@ -404,7 +405,7 @@ export async function POST(req: NextRequest) {
   let response: Groq.Chat.ChatCompletion;
   try {
     response = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-20b',
+      model: 'qwen/qwen3.8-27b',
       messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
       tools: TOOLS,
       tool_choice: 'auto',
@@ -440,7 +441,7 @@ export async function POST(req: NextRequest) {
     messages.push(...toolResults);
     try {
       response = await groq.chat.completions.create({
-        model: 'openai/gpt-oss-20b',
+        model: 'qwen/qwen3.8-27b',
         messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...messages],
         tools: TOOLS,
         tool_choice: 'auto',
@@ -448,7 +449,7 @@ export async function POST(req: NextRequest) {
       });
     } catch (e) {
       console.error('Groq tool-result call failed:', (e as Error).message);
-      const reply = 'Done — hit a snag composing the reply though.';
+      const reply = 'Done, but had trouble composing the response. Try asking again.';
       await appendConversation(userId, 'assistant', reply);
       return NextResponse.json({ reply });
     }
