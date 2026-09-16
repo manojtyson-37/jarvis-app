@@ -171,8 +171,9 @@ export default function MayaPage() {
       const decoder = new TextDecoder();
       let buffer = '';
       let fullContent = '';
+      let streamDone = false;
 
-      while (true) {
+      outer: while (!streamDone) {
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -183,7 +184,7 @@ export default function MayaPage() {
         for (const part of parts) {
           if (!part.startsWith('data: ')) continue;
           const data = part.slice(6).trim();
-          if (data === '[DONE]') break;
+          if (data === '[DONE]') { streamDone = true; break outer; }
           try {
             const { chunk } = JSON.parse(data) as { chunk: string };
             if (chunk) {

@@ -409,109 +409,122 @@ export async function POST(req: NextRequest) {
   const sseDone = () => encoder.encode('data: [DONE]\n\n');
 
   const readable = new ReadableStream({
-    async start(controller) {
+    start(controller) {
       const emit = (text: string) => controller.enqueue(sseChunk(text));
+      const close = () => { controller.enqueue(sseDone()); controller.close(); };
+
       const finish = async (reply: string) => {
         let r = reply.trim();
         r = r.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
         if (!r) r = 'Something went wrong on my end. Try again.';
-        await appendConversation(userId, 'assistant', r);
+        await appendConversation(userId, 'assistant', r).catch(() => {});
         emit(r);
-        controller.enqueue(sseDone());
-        controller.close();
+        close();
       };
 
-      const msgs: Groq.Chat.ChatCompletionMessageParam[] = [
-        ...history.map((h: { role: 'user' | 'assistant'; content: string }) => ({ role: h.role, content: h.content })),
-        { role: 'user', content: message },
-      ];
+      // Top-level net: any unhandled throw settles the controller so the stream is never leaked
+      (async () => {
+        const msgs: Groq.Chat.ChatCompletionMessageParam[] = [
+          ...history.map((h: { role: 'user' | 'assistant'; content: string }) => ({ role: h.role, content: h.content })),
+          { role: 'user', content: message },
+        ];
 
-      let response: Groq.Chat.ChatCompletion;
-      try {
-        response = await groq.chat.completions.create({
-          model: 'qwen/qwen3.8-27b',
-          messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
-          tools: TOOLS,
-          tool_choice: 'auto',
-          max_tokens: 400,
-        });
-      } catch (e) {
-        console.error('Groq initial call failed:', (e as Error).message);
-        await finish('Hit a snag — try again in a moment.');
-        return;
-      }
-
-      let turns = 0;
-      while (response.choices[0]?.finish_reason === 'tool_calls') {
-        if (++turns > 5) {
-          await finish('Took too many steps — try rephrasing.');
-          return;
-        }
-        const toolCalls = response.choices[0].message.tool_calls ?? [];
-        const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
-        const fastResults: string[] = [];
-
-        for (const tc of toolCalls) {
-          let result: string;
-          try {
-            result = await executeTool(tc.function.name, JSON.parse(tc.function.arguments), userId);
-          } catch (e) {
-            result = `Tool error: ${(e as Error).message}`;
-          }
-          toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
-          if (FAST_CONFIRM_TOOLS.has(tc.function.name)) fastResults.push(result);
-        }
-
-        // All fast-confirm — skip 2nd Groq call
-        if (fastResults.length === toolCalls.length && fastResults.length > 0) {
-          const reply = fastResults.join(' ');
-          await appendConversation(userId, 'assistant', reply);
-          emit(reply);
-          controller.enqueue(sseDone());
-          controller.close();
-          return;
-        }
-
-        msgs.push({ role: 'assistant', content: response.choices[0].message.content ?? '', tool_calls: toolCalls });
-        msgs.push(...toolResults);
-
-        // Stream the post-tool response
+        let response: Groq.Chat.ChatCompletion;
         try {
-          const groqStream = await groq.chat.completions.create({
+          response = await groq.chat.completions.create({
             model: 'qwen/qwen3.8-27b',
             messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
             tools: TOOLS,
             tool_choice: 'auto',
-            max_tokens: 600,
-            stream: true,
+            max_tokens: 400,
           });
-
-          let fullReply = '';
-          for await (const chunk of groqStream) {
-            const text = chunk.choices[0]?.delta?.content ?? '';
-            if (text) {
-              fullReply += text;
-              controller.enqueue(sseChunk(text));
-            }
-          }
-
-          fullReply = fullReply.trim();
-          fullReply = fullReply.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
-          if (!fullReply) fullReply = 'Something went wrong on my end. Try again.';
-          await appendConversation(userId, 'assistant', fullReply);
-          controller.enqueue(sseDone());
-          controller.close();
-          return;
         } catch (e) {
-          console.error('Groq stream (post-tool) failed:', (e as Error).message);
-          await finish('Done, but had trouble composing the response. Try asking again.');
+          console.error('Groq initial call failed:', (e as Error).message);
+          await finish('Hit a snag — try again in a moment.');
           return;
         }
-      }
 
-      // No tools: direct answer already in response
-      const reply = response.choices[0]?.message?.content ?? '';
-      await finish(reply);
+        let turns = 0;
+        while (response.choices[0]?.finish_reason === 'tool_calls') {
+          if (++turns > 5) {
+            await finish('Took too many steps — try rephrasing.');
+            return;
+          }
+          const toolCalls = response.choices[0].message.tool_calls ?? [];
+          const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
+          const fastResults: string[] = [];
+
+          for (const tc of toolCalls) {
+            let result: string;
+            try {
+              result = await executeTool(tc.function.name, JSON.parse(tc.function.arguments), userId);
+            } catch (e) {
+              result = `Tool error: ${(e as Error).message}`;
+            }
+            toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
+            if (FAST_CONFIRM_TOOLS.has(tc.function.name)) fastResults.push(result);
+          }
+
+          // All fast-confirm — skip 2nd Groq call
+          if (fastResults.length === toolCalls.length && fastResults.length > 0) {
+            const reply = fastResults.join(' ');
+            await appendConversation(userId, 'assistant', reply).catch(() => {});
+            emit(reply);
+            close();
+            return;
+          }
+
+          msgs.push({ role: 'assistant', content: response.choices[0].message.content ?? '', tool_calls: toolCalls });
+          msgs.push(...toolResults);
+
+          // Stream the post-tool response.
+          // tool_choice:'none' errors on qwen — keep 'auto' and only collect content deltas;
+          // if model returns tool_calls (rare), chunksEmitted stays 0 and finish() emits fallback.
+          try {
+            const groqStream = await groq.chat.completions.create({
+              model: 'qwen/qwen3.8-27b',
+              messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
+              tools: TOOLS,
+              tool_choice: 'auto',
+              max_tokens: 600,
+              stream: true,
+            });
+
+            let fullReply = '';
+            let chunksEmitted = 0;
+            for await (const chunk of groqStream) {
+              const text = chunk.choices[0]?.delta?.content ?? '';
+              if (text) {
+                fullReply += text;
+                controller.enqueue(sseChunk(text));
+                chunksEmitted++;
+              }
+            }
+
+            fullReply = fullReply.trim();
+            fullReply = fullReply.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
+            if (!fullReply) fullReply = 'Something went wrong on my end. Try again.';
+            await appendConversation(userId, 'assistant', fullReply).catch(() => {});
+            if (chunksEmitted === 0) emit(fullReply); // nothing streamed yet, emit now
+            close();
+            return;
+          } catch (e) {
+            console.error('Groq stream (post-tool) failed:', (e as Error).message);
+            const errMsg = 'Done, but had trouble composing the response. Try asking again.';
+            await appendConversation(userId, 'assistant', errMsg).catch(() => {});
+            emit(errMsg);
+            close();
+            return;
+          }
+        }
+
+        // No tools: direct answer already in response
+        const reply = response.choices[0]?.message?.content ?? '';
+        await finish(reply);
+      })().catch(e => {
+        console.error('ReadableStream start() unhandled:', (e as Error).message);
+        try { controller.error(e); } catch { /* already closed */ }
+      });
     },
   });
 
