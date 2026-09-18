@@ -9,8 +9,13 @@ export async function GET(req: Request) {
 
   // 6:30 PM IST = 13:00 UTC — treat as EOD
   const utcHour = new Date().getUTCHours();
-  const type = utcHour >= 13 && utcHour < 15 ? 'eod' : 'regular';
+  const type = utcHour === 13 ? 'eod' : 'regular';
 
-  const result = await pushCheckin('manoj', type);
-  return NextResponse.json({ ok: true, type, ...result });
+  try {
+    const result = await pushCheckin('manoj', type);
+    return NextResponse.json({ ok: true, type, ...result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+  }
 }

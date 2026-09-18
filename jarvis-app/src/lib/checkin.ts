@@ -5,7 +5,7 @@ type CheckinType = 'regular' | 'eod';
 
 export async function pushCheckin(userId: string, type: CheckinType = 'regular'): Promise<{ pushed: number }> {
   if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
-    return { pushed: 0 };
+    return { pushed: 0, reason: 'vapid_missing' };
   }
 
   webpush.setVapidDetails(
