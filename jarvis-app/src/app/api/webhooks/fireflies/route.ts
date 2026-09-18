@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { processMeeting } from '@/lib/meetingProcessor';
 import { saveMeetingNote, saveActionItems, getPushSubscriptions } from '@/lib/supabase';
@@ -5,13 +6,17 @@ import webpush from 'web-push';
 
 const USER_ID = 'manoj';
 
-async function pushMeetingNotification(title: string, actionItemCount: number) {
-  if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) return;
+// Module-level VAPID init — idempotent, avoids per-request overhead
+if (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails(
     'mailto:kbdcreditsolutions@gmail.com',
     process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
     process.env.VAPID_PRIVATE_KEY
   );
+}
+
+async function pushMeetingNotification(title: string, actionItemCount: number) {
+  if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) return;
   const subs = await getPushSubscriptions(USER_ID);
   const payload = JSON.stringify({
     title: 'Maya · Meeting processed',
@@ -29,19 +34,34 @@ async function pushMeetingNotification(title: string, actionItemCount: number) {
   );
 }
 
+function verifySignature(rawBody: string, sig: string, secret: string): boolean {
+  const expected = 'sha256=' + createHmac('sha256', secret).update(rawBody).digest('hex');
+  try {
+    return timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(req: NextRequest) {
-  // Verify webhook secret
   const secret = process.env.FIREFLIES_WEBHOOK_SECRET;
-  if (secret) {
-    const sig = req.headers.get('x-hub-signature') ?? req.headers.get('x-fireflies-signature');
-    if (!sig || sig !== secret) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+  if (!secret) {
+    // Refuse unauthenticated writes — misconfigured deployment is safer as closed
+    console.error('FIREFLIES_WEBHOOK_SECRET not set — rejecting all webhook requests');
+    return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 });
+  }
+
+  // Read body as text first so we can verify HMAC before parsing
+  const rawBody = await req.text();
+  const sig = req.headers.get('x-hub-signature') ?? req.headers.get('x-fireflies-signature') ?? '';
+
+  if (!sig || !verifySignature(rawBody, sig, secret)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   let payload: Record<string, unknown>;
   try {
-    payload = await req.json() as Record<string, unknown>;
+    payload = JSON.parse(rawBody) as Record<string, unknown>;
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }

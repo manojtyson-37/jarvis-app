@@ -415,9 +415,10 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
       }).join('\n');
     }
 
-    case 'complete_action_item':
-      await completeActionItem(userId, args.item_id as string);
-      return 'Action item marked done.';
+    case 'complete_action_item': {
+      const found = await completeActionItem(userId, args.item_id as string);
+      return found ? 'Action item marked done.' : 'No matching action item found.';
+    }
 
     default:
       return `Unknown tool: ${name}`;
@@ -456,6 +457,7 @@ export async function GET() {
 const FAST_CONFIRM_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
+  'complete_action_item',
 ]);
 
 export async function POST(req: NextRequest) {

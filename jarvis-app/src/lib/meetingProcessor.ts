@@ -125,7 +125,8 @@ export async function processMeeting(payload: FirefliesWebhookPayload): Promise<
     return {
       meeting_id: meetingId,
       title: transcript.title ?? payload.title ?? 'Meeting',
-      meeting_date: new Date(transcript.date).toISOString(),
+      // Fireflies returns date as Unix ms; multiply by 1000 only if it looks like seconds (<1e12)
+      meeting_date: new Date(transcript.date < 1e12 ? transcript.date * 1000 : transcript.date).toISOString(),
       duration_sec: transcript.duration ?? payload.duration ?? 0,
       participants: transcript.participants ?? payload.participants ?? [],
       summary,

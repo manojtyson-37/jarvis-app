@@ -287,12 +287,14 @@ export async function getPendingActionItems(userId: string, limit = 20): Promise
   return (data ?? []) as ActionItem[];
 }
 
-export async function completeActionItem(userId: string, itemId: string) {
-  const { error } = await supabase
+export async function completeActionItem(userId: string, itemId: string): Promise<boolean> {
+  const { data, error } = await supabase
     .from('action_items')
     .update({ status: 'done', completed_at: new Date().toISOString() })
-    .eq('id', itemId).eq('user_id', userId);
+    .eq('id', itemId).eq('user_id', userId)
+    .select('id');
   if (error) throw error;
+  return (data?.length ?? 0) > 0;
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────
