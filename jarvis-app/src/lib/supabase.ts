@@ -213,6 +213,88 @@ export async function saveEvolutionLog(entry: {
     .upsert(entry, { onConflict: 'date' });
 }
 
+// ── Meeting Intelligence ───────────────────────────────────────────────────
+
+export interface MeetingNote {
+  id: string;
+  meeting_id: string;
+  title: string;
+  meeting_date: string;
+  duration_sec: number | null;
+  participants: string[];
+  summary: string | null;
+  created_at: string;
+}
+
+export interface ActionItem {
+  id: string;
+  meeting_id: string | null;
+  text: string;
+  source: 'meeting' | 'checkin' | 'manual';
+  status: 'pending' | 'in_progress' | 'done' | 'skipped';
+  created_at: string;
+  completed_at: string | null;
+}
+
+export async function saveMeetingNote(
+  userId: string,
+  data: {
+    meeting_id: string;
+    title: string;
+    meeting_date: string;
+    duration_sec?: number;
+    participants?: string[];
+    summary?: string;
+    raw_transcript?: string;
+    raw_payload?: object;
+  }
+) {
+  const { error } = await supabase.from('meeting_notes')
+    .upsert({ user_id: userId, ...data }, { onConflict: 'meeting_id' });
+  if (error) throw error;
+}
+
+export async function getMeetingNotes(userId: string, limit = 5): Promise<MeetingNote[]> {
+  const { data, error } = await supabase
+    .from('meeting_notes')
+    .select('id, meeting_id, title, meeting_date, duration_sec, participants, summary, created_at')
+    .eq('user_id', userId).order('meeting_date', { ascending: false }).limit(limit);
+  if (error) throw error;
+  return (data ?? []) as MeetingNote[];
+}
+
+export async function saveActionItems(
+  userId: string,
+  items: { text: string; meeting_id?: string; source?: 'meeting' | 'checkin' | 'manual' }[]
+) {
+  if (!items.length) return;
+  const rows = items.map(i => ({
+    user_id: userId,
+    text: i.text,
+    meeting_id: i.meeting_id ?? null,
+    source: i.source ?? 'manual',
+    status: 'pending',
+  }));
+  const { error } = await supabase.from('action_items').insert(rows);
+  if (error) throw error;
+}
+
+export async function getPendingActionItems(userId: string, limit = 20): Promise<ActionItem[]> {
+  const { data, error } = await supabase
+    .from('action_items').select('*').eq('user_id', userId)
+    .eq('status', 'pending').order('created_at', { ascending: false }).limit(limit);
+  if (error) throw error;
+  return (data ?? []) as ActionItem[];
+}
+
+export async function completeActionItem(userId: string, itemId: string) {
+  const { error } = await supabase
+    .from('action_items')
+    .update({ status: 'done', completed_at: new Date().toISOString() })
+    .eq('id', itemId).eq('user_id', userId);
+  if (error) throw error;
+}
+
 // ── Dashboard ──────────────────────────────────────────────────────────────
 
 export async function getDashboardData(userId: string) {

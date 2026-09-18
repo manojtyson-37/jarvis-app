@@ -8,6 +8,7 @@ import {
   logWorkout, getRecentWorkouts,
   logFinance, getFinanceSummary,
   getMemoryFacts,
+  getMeetingNotes, getPendingActionItems, completeActionItem,
 } from '@/lib/supabase';
 import { parseReminderTime } from '@/lib/timeparser';
 
@@ -170,6 +171,46 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
           event_id: { type: 'string', description: 'The Google Calendar event ID returned by create_calendar_event or get_calendar_events' },
         },
         required: ['event_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_meeting_notes',
+      description: 'Get notes and summaries from recent meetings recorded by Fireflies. Use when asked about meetings, what was discussed, or what happened in a call.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Number of recent meetings to return (default 3)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_action_items',
+      description: 'Get pending action items extracted from meetings and check-ins. Use when asked about to-dos, tasks, what needs to be done.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Max items to return (default 20)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'complete_action_item',
+      description: 'Mark an action item as done by its ID.',
+      parameters: {
+        type: 'object',
+        properties: {
+          item_id: { type: 'string', description: 'The action item UUID' },
+        },
+        required: ['item_id'],
       },
     },
   },
@@ -352,6 +393,31 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
       if (res.status === 404 || res.status === 410) return 'Event not found — it may have already been deleted.';
       return `Failed to delete event: ${res.status}`;
     }
+
+    case 'get_meeting_notes': {
+      const meetings = await getMeetingNotes(userId, (args.limit as number) ?? 3);
+      if (!meetings.length) return 'No meeting notes yet. Meetings will appear here once Fireflies processes them.';
+      return meetings.map(m => {
+        const d = new Date(m.meeting_date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' });
+        const dur = m.duration_sec ? ` (${Math.round(m.duration_sec / 60)} min)` : '';
+        const parts = m.participants?.length ? `\nAttendees: ${m.participants.join(', ')}` : '';
+        return `**${m.title}** — ${d}${dur}${parts}\n${m.summary ?? '(no summary)'}`;
+      }).join('\n\n');
+    }
+
+    case 'get_action_items': {
+      const items = await getPendingActionItems(userId, (args.limit as number) ?? 20);
+      if (!items.length) return 'No pending action items.';
+      return items.map(i => {
+        const d = new Date(i.created_at).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
+        const src = i.source === 'meeting' ? '📋' : i.source === 'checkin' ? '✅' : '📝';
+        return `${src} [${i.id.slice(0, 8)}] ${i.text} (${d})`;
+      }).join('\n');
+    }
+
+    case 'complete_action_item':
+      await completeActionItem(userId, args.item_id as string);
+      return 'Action item marked done.';
 
     default:
       return `Unknown tool: ${name}`;
