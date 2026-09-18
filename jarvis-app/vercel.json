@@ -23,6 +23,22 @@
     {
       "path": "/api/cron/q4",
       "schedule": "30 14 * * *"
+    },
+    {
+      "path": "/api/cron/checkin",
+      "schedule": "0 4 * * 1-5"
+    },
+    {
+      "path": "/api/cron/checkin",
+      "schedule": "0 7 * * 1-5"
+    },
+    {
+      "path": "/api/cron/checkin",
+      "schedule": "0 10 * * 1-5"
+    },
+    {
+      "path": "/api/cron/checkin",
+      "schedule": "0 13 * * 1-5"
     }
   ]
 }
