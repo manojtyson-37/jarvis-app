@@ -3,7 +3,7 @@ import { getPushSubscriptions } from '@/lib/supabase';
 
 type CheckinType = 'regular' | 'eod';
 
-export async function pushCheckin(userId: string, type: CheckinType = 'regular'): Promise<{ pushed: number }> {
+export async function pushCheckin(userId: string, type: CheckinType = 'regular'): Promise<{ pushed: number; reason?: string }> {
   if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
     return { pushed: 0, reason: 'vapid_missing' };
   }
