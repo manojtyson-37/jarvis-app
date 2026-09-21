@@ -10,7 +10,7 @@ interface FirefliesTranscript {
   duration: number;
   participants: string[];
   summary?: {
-    action_items?: string[];
+    action_items?: string; // Fireflies returns this as a formatted markdown block, not an array
     overview?: string;
   };
   sentences?: { speaker_name: string; text: string }[];
@@ -67,15 +67,26 @@ async function fetchFirefliesTranscript(meetingId: string): Promise<FirefliesTra
   return data.data?.transcript ?? null;
 }
 
+function parseFirefliesActionItemsText(text: string): string[] {
+  return text
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !/^\*\*.*\*\*$/.test(l)) // drop empty lines and bold speaker-name headers
+    .map(l => l.replace(/\s*\((?:\d{1,2}:)?\d{1,2}:\d{2}\)\s*$/, '')) // strip trailing (mm:ss) or (h:mm:ss) timestamps
+    .map(l => l.replace(/^[-*•]\s+|^\d+\.\s+/, '')) // strip leading bullet/numbering markers
+    .filter(Boolean);
+}
+
 async function extractWithGroq(
   title: string,
   transcript: string,
-  firefliesItems: string[]
+  firefliesItemsText: string
 ): Promise<{ summary: string; action_items: string[] }> {
+  const fallbackItems = parseFirefliesActionItemsText(firefliesItemsText);
   const prompt = `You are extracting structured information from a meeting transcript.
 
 Meeting: ${title}
-${firefliesItems.length ? `Fireflies extracted action items: ${firefliesItems.join('; ')}` : ''}
+${firefliesItemsText ? `Fireflies extracted action items:\n${firefliesItemsText}` : ''}
 
 Transcript:
 ${transcript.slice(0, 6000)}
@@ -90,7 +101,7 @@ Be specific. Action items must be concrete, assignable tasks — not vague obser
 
   try {
     const response = await groq.chat.completions.create({
-      model: 'qwen-qwq-32b',
+      model: 'qwen/qwen3.8-27b',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: 800,
@@ -101,14 +112,26 @@ Be specific. Action items must be concrete, assignable tasks — not vague obser
     const parsed = JSON.parse(jsonMatch[0]) as { summary?: string; action_items?: string[] };
     return {
       summary: parsed.summary ?? 'Meeting processed.',
-      action_items: parsed.action_items ?? firefliesItems,
+      action_items: parsed.action_items ?? fallbackItems,
     };
-  } catch {
+  } catch (e) {
+    console.error('extractWithGroq failed:', e instanceof Error ? e.message : e);
     return {
       summary: `Meeting: ${title}`,
-      action_items: firefliesItems,
+      action_items: fallbackItems,
     };
   }
+}
+
+// transcript.duration (Fireflies GraphQL) is in minutes as a float. payload.duration (webhook
+// body fallback, only used if the GraphQL fetch itself fails) is assumed seconds — unverified.
+function resolveDurationSec(transcriptDurationMin: number | undefined, payloadDurationSec: number | undefined): number {
+  if (transcriptDurationMin != null) return Math.round(transcriptDurationMin * 60);
+  if (payloadDurationSec != null) {
+    console.warn('meetingProcessor: using unverified payload.duration unit assumption (seconds):', payloadDurationSec);
+    return payloadDurationSec;
+  }
+  return 0;
 }
 
 export async function processMeeting(payload: FirefliesWebhookPayload): Promise<ProcessedMeeting | null> {
@@ -119,15 +142,15 @@ export async function processMeeting(payload: FirefliesWebhookPayload): Promise<
 
   if (transcript) {
     const rawText = (transcript.sentences ?? []).map(s => `${s.speaker_name}: ${s.text}`).join('\n');
-    const firefliesItems = transcript.summary?.action_items ?? [];
-    const { summary, action_items } = await extractWithGroq(transcript.title, rawText, firefliesItems);
+    const firefliesItemsText = transcript.summary?.action_items ?? '';
+    const { summary, action_items } = await extractWithGroq(transcript.title, rawText, firefliesItemsText);
 
     return {
       meeting_id: meetingId,
       title: transcript.title ?? payload.title ?? 'Meeting',
       // Fireflies returns date as Unix ms; multiply by 1000 only if it looks like seconds (<1e12)
       meeting_date: new Date(transcript.date < 1e12 ? transcript.date * 1000 : transcript.date).toISOString(),
-      duration_sec: transcript.duration ?? payload.duration ?? 0,
+      duration_sec: resolveDurationSec(transcript.duration, payload.duration),
       participants: transcript.participants ?? payload.participants ?? [],
       summary,
       action_items,
