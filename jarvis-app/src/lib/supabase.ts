@@ -297,6 +297,20 @@ export async function completeActionItem(userId: string, itemId: string): Promis
   return (data?.length ?? 0) > 0;
 }
 
+// ── Task Queue (audit log for automated actions) ────────────────────────────
+
+export async function logTaskExecution(
+  userId: string,
+  actionType: 'freshdesk' | 'redash' | 'coralogix' | 'email',
+  description: string,
+  payload?: object
+) {
+  const { error } = await supabase.from('task_queue').insert({
+    user_id: userId, action_type: actionType, description, payload: payload ?? null,
+  });
+  if (error) console.error('logTaskExecution failed:', error.message);
+}
+
 // ── Dashboard ──────────────────────────────────────────────────────────────
 
 export async function getDashboardData(userId: string) {

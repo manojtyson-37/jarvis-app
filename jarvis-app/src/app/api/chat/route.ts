@@ -9,8 +9,12 @@ import {
   logFinance, getFinanceSummary,
   getMemoryFacts,
   getMeetingNotes, getPendingActionItems, completeActionItem,
+  logTaskExecution,
 } from '@/lib/supabase';
 import { parseReminderTime } from '@/lib/timeparser';
+import { getTicket, updateTicketStatus, addTicketNote } from '@/lib/freshdesk';
+import { getQueryResults } from '@/lib/redash';
+import { searchLogs } from '@/lib/coralogix';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -211,6 +215,72 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
           item_id: { type: 'string', description: 'The action item UUID' },
         },
         required: ['item_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_freshdesk_ticket',
+      description: 'Look up a Freshdesk support ticket by its ID.',
+      parameters: {
+        type: 'object',
+        properties: { ticket_id: { type: 'string', description: 'The Freshdesk ticket number' } },
+        required: ['ticket_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_freshdesk_ticket',
+      description: 'Update the status of a Freshdesk ticket.',
+      parameters: {
+        type: 'object',
+        properties: {
+          ticket_id: { type: 'string' },
+          status: { type: 'string', description: 'One of: open, pending, resolved, closed' },
+        },
+        required: ['ticket_id', 'status'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_freshdesk_note',
+      description: 'Add a private note to a Freshdesk ticket.',
+      parameters: {
+        type: 'object',
+        properties: { ticket_id: { type: 'string' }, note: { type: 'string' } },
+        required: ['ticket_id', 'note'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_redash_query',
+      description: 'Run a saved Redash query by ID and return its latest cached results.',
+      parameters: {
+        type: 'object',
+        properties: { query_id: { type: 'string', description: 'The Redash query ID' } },
+        required: ['query_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_logs',
+      description: 'Search application logs in Coralogix using a DataPrime or Lucene query.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'DataPrime query, e.g. "source logs | filter $d.severity == \'ERROR\'"' },
+          hours: { type: 'number', description: 'How many hours back to search (default 1)' },
+        },
+        required: ['query'],
       },
     },
   },
@@ -420,6 +490,33 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
       return found ? 'Action item marked done.' : 'No matching action item found.';
     }
 
+    case 'get_freshdesk_ticket':
+      return getTicket(args.ticket_id as string);
+
+    case 'update_freshdesk_ticket': {
+      const result = await updateTicketStatus(args.ticket_id as string, args.status as string);
+      if (result.ok) {
+        await logTaskExecution(userId, 'freshdesk', result.message, { ticket_id: args.ticket_id, status: args.status });
+      }
+      return result.message;
+    }
+
+    case 'add_freshdesk_note': {
+      const result = await addTicketNote(args.ticket_id as string, args.note as string);
+      if (result.ok) {
+        await logTaskExecution(userId, 'freshdesk', result.message, { ticket_id: args.ticket_id, note: args.note });
+      }
+      return result.message;
+    }
+
+    case 'run_redash_query':
+      return getQueryResults(args.query_id as string);
+
+    case 'search_logs': {
+      const hours = Math.min(Math.max((args.hours as number) ?? 1, 1), 168);
+      return searchLogs(args.query as string, hours);
+    }
+
     default:
       return `Unknown tool: ${name}`;
   }
@@ -457,7 +554,7 @@ export async function GET() {
 const FAST_CONFIRM_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
-  'complete_action_item',
+  'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note',
 ]);
 
 export async function POST(req: NextRequest) {
