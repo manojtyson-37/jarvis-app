@@ -109,19 +109,24 @@ export default function MayaPage() {
       if (!vapidKey) return;
       try {
         const reg = await navigator.serviceWorker.ready;
-        const existing = await reg.pushManager.getSubscription();
-        if (existing) return; // already subscribed
-        const perm = await Notification.requestPermission();
-        if (perm !== 'granted') return;
-        const sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(vapidKey),
-        });
-        await fetch('/api/push/subscribe', {
+        let sub = await reg.pushManager.getSubscription();
+        if (!sub) {
+          const perm = await Notification.requestPermission();
+          if (perm !== 'granted') return;
+          sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(vapidKey),
+          });
+        }
+        // Always re-register with the backend, even for an existing browser subscription —
+        // the server-side record can be lost independently (e.g. a database migration)
+        // while the browser's own subscription object persists. This POST is idempotent.
+        const res = await fetch('/api/push/subscribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ subscription: sub }),
         });
+        if (!res.ok) console.warn('Push subscribe backend rejected:', res.status);
       } catch (e) {
         console.warn('Push subscription failed:', e);
       }

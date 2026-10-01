@@ -158,6 +158,11 @@ export async function getPushSubscriptions(userId: string) {
   return data ?? [];
 }
 
+export async function deletePushSubscription(userId: string) {
+  const { error } = await supabase.from('push_subscriptions').delete().eq('user_id', userId);
+  if (error) throw error;
+}
+
 export async function getDueReminders(userId: string) {
   const now = new Date().toISOString();
   const { data, error } = await supabase

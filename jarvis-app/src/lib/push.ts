@@ -1,5 +1,5 @@
 import webpush from 'web-push';
-import { getPushSubscriptions } from '@/lib/supabase';
+import { getPushSubscriptions, deletePushSubscription } from '@/lib/supabase';
 
 if (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails(
@@ -22,5 +22,18 @@ export async function sendPush(userId: string, payload: { title: string; body: s
       webpush.sendNotification(s.subscription as Parameters<typeof webpush.sendNotification>[0], json)
     )
   );
+
+  // A 404/410 means the push service has permanently invalidated this endpoint
+  // (browser unsubscribed, subscription rotated) — clean it up so it doesn't sit
+  // forever producing silent delivery failures.
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      const statusCode = (r.reason as { statusCode?: number } | undefined)?.statusCode;
+      if (statusCode === 404 || statusCode === 410) {
+        await deletePushSubscription(userId).catch(() => {});
+      }
+    }
+  }
+
   return results.some(r => r.status === 'fulfilled');
 }
