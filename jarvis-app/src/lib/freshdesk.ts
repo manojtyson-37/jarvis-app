@@ -24,6 +24,28 @@ function validTicketId(ticketId: string): boolean {
   return /^\d+$/.test(ticketId);
 }
 
+export interface FreshdeskTicketSummary {
+  id: number;
+  subject: string;
+  status: number;
+  priority: number;
+}
+
+// "new_and_my_open" is a Freshdesk built-in filter scoped to the authenticated
+// agent's own tickets — no separate agent-ID lookup needed.
+export async function listMyOpenTickets(): Promise<FreshdeskTicketSummary[]> {
+  if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return [];
+  const res = await fetch(`${baseUrl()}/tickets?filter=new_and_my_open&order_by=created_at&order_type=desc`, {
+    headers: { Authorization: authHeader() },
+  });
+  if (!res.ok) {
+    console.error('Freshdesk listMyOpenTickets failed:', res.status, await res.text());
+    return [];
+  }
+  const data = await res.json() as FreshdeskTicketSummary[];
+  return data;
+}
+
 export async function getTicket(ticketId: string): Promise<string> {
   if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return 'Freshdesk not configured.';
   if (!validTicketId(ticketId)) return 'Invalid ticket ID — must be numeric.';

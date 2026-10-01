@@ -1,0 +1,26 @@
+import webpush from 'web-push';
+import { getPushSubscriptions } from '@/lib/supabase';
+
+if (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    'mailto:kbdcreditsolutions@gmail.com',
+    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+}
+
+// Returns true only if at least one subscription actually received the push —
+// callers that gate follow-up state (e.g. "mark as seen/notified") on delivery
+// must not do so if this returns false, or the item becomes permanently invisible.
+export async function sendPush(userId: string, payload: { title: string; body: string; icon?: string; data?: object }): Promise<boolean> {
+  if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) return false;
+  const subs = await getPushSubscriptions(userId);
+  if (!subs.length) return false;
+  const json = JSON.stringify({ icon: '/icon-192.png', ...payload });
+  const results = await Promise.allSettled(
+    subs.map((s: { subscription: object }) =>
+      webpush.sendNotification(s.subscription as Parameters<typeof webpush.sendNotification>[0], json)
+    )
+  );
+  return results.some(r => r.status === 'fulfilled');
+}

@@ -1,4 +1,6 @@
 import Groq from 'groq-sdk';
+import { saveMeetingNote, saveActionItems, claimMeeting, deleteMeetingNote } from '@/lib/supabase';
+import { pushMeetingNotification } from '@/lib/meetingNotify';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -65,6 +67,23 @@ async function fetchFirefliesTranscript(meetingId: string): Promise<FirefliesTra
 
   const data = await res.json() as { data?: { transcript?: FirefliesTranscript } };
   return data.data?.transcript ?? null;
+}
+
+export async function listRecentTranscriptIds(limit = 20): Promise<string[]> {
+  const apiKey = process.env.FIREFLIES_API_KEY;
+  if (!apiKey) return [];
+
+  const res = await fetch('https://api.fireflies.ai/graphql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ query: `query { transcripts(limit: ${limit}) { id } }` }),
+  });
+  if (!res.ok) {
+    console.error('Fireflies transcripts list error:', res.status, await res.text());
+    return [];
+  }
+  const data = await res.json() as { data?: { transcripts?: { id: string }[] } };
+  return (data.data?.transcripts ?? []).map(t => t.id);
 }
 
 function parseFirefliesActionItemsText(text: string): string[] {
@@ -168,4 +187,53 @@ export async function processMeeting(payload: FirefliesWebhookPayload): Promise<
     summary: 'Transcript fetch pending — add FIREFLIES_API_KEY to enable full processing.',
     action_items: [],
   };
+}
+
+// Full pipeline: fetch/extract + persist + notify. Shared by the webhook and the
+// reconciliation cron so both paths behave identically.
+export async function processAndSaveMeeting(
+  userId: string,
+  payload: FirefliesWebhookPayload,
+  rawPayload?: Record<string, unknown>
+): Promise<ProcessedMeeting | null> {
+  const meetingId = payload.meeting_id ?? payload.meetingId;
+  if (!meetingId) return null;
+
+  // Claim before the expensive fetch+Groq work starts — if the webhook and the
+  // reconciliation cron race on the same meeting, only the winner proceeds.
+  const claimed = await claimMeeting(userId, meetingId, payload.title ?? 'Meeting');
+  if (!claimed) return null;
+
+  try {
+    const meeting = await processMeeting(payload);
+    if (!meeting) {
+      await deleteMeetingNote(userId, meetingId); // release the claim — nothing to save
+      return null;
+    }
+
+    await saveMeetingNote(userId, {
+      meeting_id: meeting.meeting_id,
+      title: meeting.title,
+      meeting_date: meeting.meeting_date,
+      duration_sec: meeting.duration_sec,
+      participants: meeting.participants,
+      summary: meeting.summary,
+      raw_transcript: meeting.raw_transcript,
+      raw_payload: rawPayload,
+    });
+
+    await saveActionItems(
+      userId,
+      meeting.action_items.map(text => ({ text, meeting_id: meeting.meeting_id, source: 'meeting' as const }))
+    );
+
+    await pushMeetingNotification(userId, meeting.title, meeting.action_items.length);
+
+    return meeting;
+  } catch (e) {
+    // Release the claim so the next reconciliation run can retry this meeting
+    // instead of treating the half-written placeholder as already processed.
+    await deleteMeetingNote(userId, meetingId).catch(() => {});
+    throw e;
+  }
 }
