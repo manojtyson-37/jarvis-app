@@ -103,15 +103,39 @@ export default function MayaPage() {
 
   // Register push subscription on mount
   useEffect(() => {
+    function reportDiag(stage: string, extra?: object) {
+      const info = {
+        stage,
+        standalone: typeof window !== 'undefined' && window.matchMedia('(display-mode: standalone)').matches,
+        iosStandalone: typeof navigator !== 'undefined' && (navigator as { standalone?: boolean }).standalone,
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+        notificationPermission: typeof Notification !== 'undefined' ? Notification.permission : 'unsupported',
+        ...extra,
+      };
+      fetch('/api/push/diag', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(info),
+      }).catch(() => {});
+    }
+
     async function subscribePush() {
-      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        reportDiag('no_sw_or_pushmanager_support');
+        return;
+      }
       const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-      if (!vapidKey) return;
+      if (!vapidKey) {
+        reportDiag('no_vapid_key_bundled');
+        return;
+      }
       try {
         const reg = await navigator.serviceWorker.ready;
         let sub = await reg.pushManager.getSubscription();
+        reportDiag('sw_ready', { hadExistingSub: !!sub });
         if (!sub) {
           const perm = await Notification.requestPermission();
+          reportDiag('permission_requested', { perm });
           if (perm !== 'granted') return;
           sub = await reg.pushManager.subscribe({
             userVisibleOnly: true,
@@ -126,8 +150,10 @@ export default function MayaPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ subscription: sub }),
         });
+        reportDiag('subscribe_posted', { status: res.status });
         if (!res.ok) console.warn('Push subscribe backend rejected:', res.status);
       } catch (e) {
+        reportDiag('exception', { error: e instanceof Error ? e.message : String(e) });
         console.warn('Push subscription failed:', e);
       }
     }
