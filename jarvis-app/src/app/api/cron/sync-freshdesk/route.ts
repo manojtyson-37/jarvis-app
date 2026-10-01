@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { listMyOpenTickets } from '@/lib/freshdesk';
 import { isFreshdeskTicketSeen, markFreshdeskTicketSeen } from '@/lib/supabase';
 import { sendPush } from '@/lib/push';
+import { errorMessage } from '@/lib/errorMessage';
 
 const USER_ID = 'manoj';
 const PRIORITY_NAMES: Record<number, string> = { 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Urgent' };
@@ -40,7 +41,7 @@ export async function GET(req: Request) {
 
     return NextResponse.json({ ok: true, checked: tickets.length, notified, deliveryFailed });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errorMessage(e);
     console.error('sync-freshdesk cron error:', msg);
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
