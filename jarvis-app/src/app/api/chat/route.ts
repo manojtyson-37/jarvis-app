@@ -563,6 +563,21 @@ export async function POST(req: NextRequest) {
 
   if (!message?.trim()) return NextResponse.json({ error: 'Empty message' }, { status: 400 });
 
+  // The model has shown it will sometimes skip calling get_freshdesk_ticket entirely and
+  // fabricate a plausible-looking but completely wrong answer (confirmed: finish_reason 'stop'
+  // with no tool_calls, inventing a customer name/email/ticket content) instead of admitting
+  // uncertainty. Rather than bypassing the LLM entirely (which would drop any other intent in
+  // the same message and override cases where the user wasn't actually asking for a lookup),
+  // force tool_choice to that specific function when a ticket number is mentioned — the model
+  // still composes the actual reply and can address the rest of the message, but now always
+  // has real ticket data in context instead of a choice to skip the lookup. Forcing the call is
+  // safe even for a false-positive match ("I already handled ticket 598317") since it's a
+  // read-only lookup, not a side-effecting action.
+  const ticketMatch = /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
+  const forcedToolChoice = ticketMatch
+    ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
+    : 'auto' as const;
+
   const [history, memoryFacts] = await Promise.all([
     getConversationHistory(userId, 10),
     getMemoryFacts(userId, 20),
@@ -600,7 +615,7 @@ export async function POST(req: NextRequest) {
             model: 'qwen/qwen3.8-27b',
             messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
             tools: TOOLS,
-            tool_choice: 'auto',
+            tool_choice: forcedToolChoice,
             max_tokens: 400,
           });
         } catch (e) {
@@ -609,7 +624,6 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        console.log('TOOL_DEBUG finish_reason:', response.choices[0]?.finish_reason, 'content_preview:', response.choices[0]?.message?.content?.slice(0, 100));
         let turns = 0;
         while (response.choices[0]?.finish_reason === 'tool_calls') {
           if (++turns > 5) {
@@ -620,7 +634,6 @@ export async function POST(req: NextRequest) {
           const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
           const fastResults: string[] = [];
 
-          console.log('TOOL_DEBUG toolCalls:', toolCalls.map(tc => tc.function.name + '(' + tc.function.arguments + ')'));
           for (const tc of toolCalls) {
             let result: string;
             try {
