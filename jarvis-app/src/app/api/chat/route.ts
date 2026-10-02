@@ -609,6 +609,7 @@ export async function POST(req: NextRequest) {
           return;
         }
 
+        console.log('TOOL_DEBUG finish_reason:', response.choices[0]?.finish_reason, 'content_preview:', response.choices[0]?.message?.content?.slice(0, 100));
         let turns = 0;
         while (response.choices[0]?.finish_reason === 'tool_calls') {
           if (++turns > 5) {
@@ -619,6 +620,7 @@ export async function POST(req: NextRequest) {
           const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
           const fastResults: string[] = [];
 
+          console.log('TOOL_DEBUG toolCalls:', toolCalls.map(tc => tc.function.name + '(' + tc.function.arguments + ')'));
           for (const tc of toolCalls) {
             let result: string;
             try {
