@@ -130,6 +130,16 @@ export default function MayaPage() {
         return;
       }
       try {
+        // next-pwa's `register: true` injects its register script into the Pages Router's
+        // `main.js` webpack entry — App Router pages load `main-app.js` instead, so that
+        // script never ships here and a service worker is never registered. Without this,
+        // `navigator.serviceWorker.ready` waits forever for a registration that's never
+        // created. Guarded to production only: next-pwa's `disable` option skips rebuilding
+        // public/sw.js in dev, so a stale production sw.js left on disk from a prior build
+        // would otherwise get installed and serve cached responses during local dev.
+        if (process.env.NODE_ENV === 'production') {
+          await navigator.serviceWorker.register('/sw.js');
+        }
         const reg = await navigator.serviceWorker.ready;
         let sub = await reg.pushManager.getSubscription();
         reportDiag('sw_ready', { hadExistingSub: !!sub });
