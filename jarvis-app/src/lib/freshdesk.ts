@@ -18,6 +18,7 @@ export interface FreshdeskTicket {
   status: number;
   priority: number;
   requester_id: number;
+  requester?: { name?: string; email?: string };
 }
 
 function validTicketId(ticketId: string): boolean {
@@ -49,13 +50,17 @@ export async function listMyOpenTickets(): Promise<FreshdeskTicketSummary[]> {
 export async function getTicket(ticketId: string): Promise<string> {
   if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return 'Freshdesk not configured.';
   if (!validTicketId(ticketId)) return 'Invalid ticket ID — must be numeric.';
-  const res = await fetch(`${baseUrl()}/tickets/${ticketId}`, {
+  // include=requester embeds the requester's name/email inline — without it only a bare
+  // requester_id number comes back, which is useless in a reply and invites the model to
+  // guess/fabricate a customer name instead of saying it doesn't have one.
+  const res = await fetch(`${baseUrl()}/tickets/${ticketId}?include=requester`, {
     headers: { Authorization: authHeader() },
   });
   if (res.status === 404) return `Ticket #${ticketId} not found.`;
   if (!res.ok) return `Freshdesk fetch failed: ${res.status}`;
   const t = await res.json() as FreshdeskTicket;
-  return `#${t.id} "${t.subject}" — ${STATUS_NAMES[t.status] ?? t.status} / ${PRIORITY_NAMES[t.priority] ?? t.priority} priority\n${(t.description_text ?? '').slice(0, 300)}`;
+  const requester = t.requester?.name || t.requester?.email || `requester #${t.requester_id}`;
+  return `#${t.id} "${t.subject}" — ${STATUS_NAMES[t.status] ?? t.status} / ${PRIORITY_NAMES[t.priority] ?? t.priority} priority\nFrom: ${requester}\n${(t.description_text ?? '').slice(0, 300)}`;
 }
 
 export async function updateTicketStatus(ticketId: string, status: string): Promise<{ ok: boolean; message: string }> {
