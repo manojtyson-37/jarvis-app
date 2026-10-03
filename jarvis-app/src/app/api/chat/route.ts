@@ -15,7 +15,7 @@ import { parseReminderTime } from '@/lib/timeparser';
 import { getTicket, updateTicketStatus, addTicketNote } from '@/lib/freshdesk';
 import { getQueryResults } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
-import { listRecentEmails, getEmail, sendEmail } from '@/lib/gmail';
+import { listRecentEmails, getEmail, sendEmail, listLabels } from '@/lib/gmail';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -327,6 +327,14 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'list_labels',
+      description: "List Manoj's custom Gmail labels (folders/tags he uses to organize his jodopay inbox).",
+      parameters: { type: 'object', properties: {} },
+    },
+  },
 ];
 
 async function executeTool(name: string, args: Record<string, unknown>, userId: string): Promise<string> {
@@ -574,6 +582,9 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
       return result.message;
     }
 
+    case 'list_labels':
+      return listLabels();
+
     default:
       return `Unknown tool: ${name}`;
   }
@@ -628,7 +639,7 @@ const SKIP_NARRATION_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
   'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note',
-  'get_freshdesk_ticket', 'list_emails', 'get_email',
+  'get_freshdesk_ticket', 'list_emails', 'get_email', 'list_labels',
 ]);
 
 export async function POST(req: NextRequest) {
@@ -660,14 +671,20 @@ export async function POST(req: NextRequest) {
   // match below, so "show me email <id>" routes to get_email rather than getting swept into
   // the broader "show...email" inbox-check pattern and incorrectly forced to list_emails.
   const emailIdMatch = /\b[0-9a-f]{10,}\b/i.test(message);
-  const inboxCheckMatch = !emailIdMatch && /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
+  // Scoped to email/Gmail context, not bare "label" — otherwise "what label would you give
+  // this idea" or "add a label to this note" would wrongly force a Gmail tool call too.
+  const labelMatch = /\blabels?\b.{0,20}\b(email|gmail|inbox)\b|\b(email|gmail|inbox)\b.{0,20}\blabels?\b/i.test(message);
+  const inboxCheckMatch = !emailIdMatch && !labelMatch
+    && /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
     : emailIdMatch
       ? { type: 'function' as const, function: { name: 'get_email' } }
-      : inboxCheckMatch
-        ? { type: 'function' as const, function: { name: 'list_emails' } }
-        : 'auto' as const;
+      : labelMatch
+        ? { type: 'function' as const, function: { name: 'list_labels' } }
+        : inboxCheckMatch
+          ? { type: 'function' as const, function: { name: 'list_emails' } }
+          : 'auto' as const;
 
   const [history, memoryFacts] = await Promise.all([
     getConversationHistory(userId, 10),
