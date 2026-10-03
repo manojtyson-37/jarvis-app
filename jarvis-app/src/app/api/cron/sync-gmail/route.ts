@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { fetchMessageSummaries } from '@/lib/gmail';
+import { fetchMessageSummaries, type EmailSummary } from '@/lib/gmail';
 import { isGmailMessageSeen, markGmailMessageSeen } from '@/lib/supabase';
 import { sendPush } from '@/lib/push';
 import { errorMessage } from '@/lib/errorMessage';
@@ -20,7 +20,7 @@ export async function GET(req: Request) {
 
   try {
     const seenIds = new Set<string>();
-    const candidates: { id: string; from: string; subject: string; automated: boolean }[] = [];
+    const candidates: EmailSummary[] = [];
     let labelErrors = 0;
 
     for (const label of MONITORED_LABELS) {
@@ -48,12 +48,13 @@ export async function GET(req: Request) {
 
       // Cap length — an oversized/malformed From or Subject could push the webpush payload
       // over the push service's size limit, causing silent delivery failure every run (since
-      // delivery failures aren't marked seen and retry indefinitely).
-      const from = c.from.slice(0, 150);
+      // delivery failures aren't marked seen and retry indefinitely). fromName (not the raw
+      // header) so the notification reads as a name, not `"Jane Doe" <jane@x.com>`.
+      const from = c.fromName.slice(0, 150);
       const subject = c.subject.slice(0, 150);
       const delivered = await sendPush(USER_ID, {
         title: c.automated ? 'Maya · New mail (auto)' : 'Maya · New mail — may need a reply',
-        body: `From: ${from} — "${subject}"`,
+        body: `${from} — "${subject}"`,
         data: { prefill: `Show me email ${c.id}` },
       });
 
