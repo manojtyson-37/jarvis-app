@@ -359,6 +359,21 @@ export async function markFreshdeskTicketSeen(userId: string, ticketId: string) 
   if (error) throw error;
 }
 
+// ── Gmail Sync ───────────────────────────────────────────────────────────────
+
+export async function isGmailMessageSeen(messageId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('gmail_messages_seen').select('message_id').eq('message_id', messageId).maybeSingle();
+  if (error) throw error;
+  return data !== null;
+}
+
+export async function markGmailMessageSeen(userId: string, messageId: string) {
+  const { error } = await supabase
+    .from('gmail_messages_seen').insert({ message_id: messageId, user_id: userId });
+  if (error) throw error;
+}
+
 // ── Dashboard ──────────────────────────────────────────────────────────────
 
 export async function getDashboardData(userId: string) {
