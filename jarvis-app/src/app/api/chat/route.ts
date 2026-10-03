@@ -632,15 +632,18 @@ export async function POST(req: NextRequest) {
   // has real ticket data in context instead of a choice to skip the lookup. Forcing the call is
   // safe even for a false-positive match ("I already handled ticket 598317") since it's a
   // read-only lookup, not a side-effecting action.
-  // Accepted residual risk: Gmail reads (list_emails/get_email) have no equivalent forced-route
-  // here — there's no clean deterministic pattern analogous to a ticket number for "check my
-  // inbox" style requests. They rely on the anti-fabrication system prompt rule alone, which
-  // was already shown insufficient on its own for the Freshdesk case before this forced-choice
-  // fix existed. Revisit if the same skip-and-fabricate failure is observed for Gmail.
+  // Confirmed: the exact same skip-and-fabricate failure happens for Gmail too (model invented
+  // a detailed fake inbox — specific senders, subjects — when the real unread count was 0).
+  // Unlike a ticket number there's no single target function (could be list/get/send), so force
+  // 'required' instead of a specific function name — this still lets the model pick the right
+  // one of the email tools, it just can no longer choose to answer with zero tool calls.
   const ticketMatch = /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
+  const emailMatch = /\b(email|inbox|unread|mail)\b/i.test(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
-    : 'auto' as const;
+    : emailMatch
+      ? 'required' as const
+      : 'auto' as const;
 
   const [history, memoryFacts] = await Promise.all([
     getConversationHistory(userId, 10),
