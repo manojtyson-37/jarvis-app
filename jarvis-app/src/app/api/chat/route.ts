@@ -607,13 +607,28 @@ export async function GET() {
   return NextResponse.json({ history });
 }
 
-// Tools that confirm an action — skip the 2nd Groq call
-const FAST_CONFIRM_TOOLS = new Set([
+// Tools whose result skips the 2nd (narration) Groq call and gets returned raw instead.
+// Two distinct reasons a tool lands here:
+//  (a) write/confirm actions — a narrated "I did X" adds nothing over the raw confirmation.
+//  (b) high-risk factual lookups — confirmed (Freshdesk ticket, Gmail inbox) that the narration
+//      pass will sometimes disregard the real tool result already in context and fabricate a
+//      different, wrong, plausible-sounding answer instead. Forcing tool_choice on the FIRST
+//      call only guarantees the tool gets called; it does nothing to stop the SECOND call from
+//      ignoring that real result, since that pass still runs with tool_choice:'auto'. Skipping
+//      it entirely for these tools removes the fabrication opportunity structurally rather than
+//      relying on a prompt instruction the model has already shown it won't reliably follow.
+// send_email is deliberately NOT here — narration for an already-sent email is just reporting
+// what happened, with no real data to override, so there's no equivalent risk to avoid.
+// KNOWN GAP, not closed by this set: a turn where the model calls one of these tools ALONGSIDE
+// a tool NOT in this set (e.g. get_freshdesk_ticket + get_calendar_events together) falls through
+// to the normal narration path below with tool_choice:'auto' — the exact same unresolved
+// fabrication risk this set exists to avoid, just for a mixed-tool turn instead of a single-tool
+// one. This is unchanged risk, not reduced risk, for any multi-tool-type turn.
+const SKIP_NARRATION_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
   'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note',
-  // send_email deliberately excluded: an irreversible, third-party-visible action that
-  // shouldn't skip the narration pass the way internal writes do.
+  'get_freshdesk_ticket', 'list_emails', 'get_email',
 ]);
 
 export async function POST(req: NextRequest) {
@@ -634,15 +649,18 @@ export async function POST(req: NextRequest) {
   // read-only lookup, not a side-effecting action.
   // Confirmed: the exact same skip-and-fabricate failure happens for Gmail too (model invented
   // a detailed fake inbox — specific senders, subjects — when the real unread count was 0).
-  // Unlike a ticket number there's no single target function (could be list/get/send), so force
-  // 'required' instead of a specific function name — this still lets the model pick the right
-  // one of the email tools, it just can no longer choose to answer with zero tool calls.
+  // Tried forcing generic tool_choice:'required' first — rejected on review: 'required' isn't
+  // scoped to the 3 Gmail functions, it just forces *some* tool from the full ~20-tool list, so
+  // an over-broad keyword match could silently force-execute an unrelated write (e.g. save_note)
+  // with no narration pass left to catch the mismatch. Force the specific list_emails function
+  // instead, matching the ticket pattern, and narrow the trigger to inbox-check phrasing (not
+  // bare "email" — that would wrongly also fire on "what's my email address").
   const ticketMatch = /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
-  const emailMatch = /\b(email|inbox|unread|mail)\b/i.test(message);
+  const inboxCheckMatch = /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
-    : emailMatch
-      ? 'required' as const
+    : inboxCheckMatch
+      ? { type: 'function' as const, function: { name: 'list_emails' } }
       : 'auto' as const;
 
   const [history, memoryFacts] = await Promise.all([
@@ -709,12 +727,14 @@ export async function POST(req: NextRequest) {
               result = `Tool error: ${(e as Error).message}`;
             }
             toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
-            if (FAST_CONFIRM_TOOLS.has(tc.function.name)) fastResults.push(result);
+            if (SKIP_NARRATION_TOOLS.has(tc.function.name)) fastResults.push(result);
           }
 
           // All fast-confirm — skip 2nd Groq call
           if (fastResults.length === toolCalls.length && fastResults.length > 0) {
-            const reply = fastResults.join(' ');
+            // '\n\n' not ' ' — several entries in this set (ticket/email lookups) are multi-line
+            // formatted blocks, not one-line confirmations; joining with a space would mash them together.
+            const reply = fastResults.join('\n\n');
             await appendConversation(userId, 'assistant', reply).catch(() => {});
             emit(reply);
             close();
