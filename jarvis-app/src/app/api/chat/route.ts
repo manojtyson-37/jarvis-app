@@ -656,7 +656,11 @@ export async function POST(req: NextRequest) {
   // instead, matching the ticket pattern, and narrow the trigger to inbox-check phrasing (not
   // bare "email" — that would wrongly also fire on "what's my email address").
   const ticketMatch = /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
-  const inboxCheckMatch = /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
+  // A Gmail message ID is a long hex string — check for one BEFORE the general inbox-check
+  // match below, so "show me email <id>" routes to get_email rather than getting swept into
+  // the broader "show...email" inbox-check pattern and incorrectly forced to list_emails.
+  const emailIdMatch = /\b[0-9a-f]{10,}\b/i.test(message);
+  const inboxCheckMatch = !emailIdMatch && /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
     : inboxCheckMatch
