@@ -663,9 +663,11 @@ export async function POST(req: NextRequest) {
   const inboxCheckMatch = !emailIdMatch && /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
-    : inboxCheckMatch
-      ? { type: 'function' as const, function: { name: 'list_emails' } }
-      : 'auto' as const;
+    : emailIdMatch
+      ? { type: 'function' as const, function: { name: 'get_email' } }
+      : inboxCheckMatch
+        ? { type: 'function' as const, function: { name: 'list_emails' } }
+        : 'auto' as const;
 
   const [history, memoryFacts] = await Promise.all([
     getConversationHistory(userId, 10),
