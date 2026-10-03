@@ -15,6 +15,7 @@ import { parseReminderTime } from '@/lib/timeparser';
 import { getTicket, updateTicketStatus, addTicketNote } from '@/lib/freshdesk';
 import { getQueryResults } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
+import { listRecentEmails, getEmail, sendEmail } from '@/lib/gmail';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -284,6 +285,48 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'list_emails',
+      description: "List recent emails from Manoj's jodopay Gmail inbox, optionally filtered by a Gmail search query.",
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Gmail search query, e.g. "is:unread", "from:someone@example.com". Default "is:unread".' },
+          max_results: { type: 'number', description: 'Max emails to return (default 10)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_email',
+      description: 'Get the full content of one email by its Gmail message ID (from list_emails results).',
+      parameters: {
+        type: 'object',
+        properties: { message_id: { type: 'string', description: 'The Gmail message ID' } },
+        required: ['message_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'send_email',
+      description: "Send an email from Manoj's jodopay Gmail account.",
+      parameters: {
+        type: 'object',
+        properties: {
+          to: { type: 'string', description: 'Recipient email address' },
+          subject: { type: 'string' },
+          body: { type: 'string' },
+        },
+        required: ['to', 'subject', 'body'],
+      },
+    },
+  },
 ];
 
 async function executeTool(name: string, args: Record<string, unknown>, userId: string): Promise<string> {
@@ -517,6 +560,20 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
       return searchLogs(args.query as string, hours);
     }
 
+    case 'list_emails':
+      return listRecentEmails((args.query as string) ?? 'is:unread', (args.max_results as number) ?? 10);
+
+    case 'get_email':
+      return getEmail(args.message_id as string);
+
+    case 'send_email': {
+      const result = await sendEmail(args.to as string, args.subject as string, args.body as string);
+      if (result.ok) {
+        await logTaskExecution(userId, 'email', result.message, { to: args.to, subject: args.subject });
+      }
+      return result.message;
+    }
+
     default:
       return `Unknown tool: ${name}`;
   }
@@ -555,6 +612,8 @@ const FAST_CONFIRM_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
   'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note',
+  // send_email deliberately excluded: an irreversible, third-party-visible action that
+  // shouldn't skip the narration pass the way internal writes do.
 ]);
 
 export async function POST(req: NextRequest) {
@@ -573,6 +632,11 @@ export async function POST(req: NextRequest) {
   // has real ticket data in context instead of a choice to skip the lookup. Forcing the call is
   // safe even for a false-positive match ("I already handled ticket 598317") since it's a
   // read-only lookup, not a side-effecting action.
+  // Accepted residual risk: Gmail reads (list_emails/get_email) have no equivalent forced-route
+  // here — there's no clean deterministic pattern analogous to a ticket number for "check my
+  // inbox" style requests. They rely on the anti-fabrication system prompt rule alone, which
+  // was already shown insufficient on its own for the Freshdesk case before this forced-choice
+  // fix existed. Revisit if the same skip-and-fabricate failure is observed for Gmail.
   const ticketMatch = /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
