@@ -124,3 +124,111 @@ export async function addTicketNote(ticketId: string, note: string): Promise<{ o
   if (!res.ok) return { ok: false, message: `Failed to add note: ${res.status}` };
   return { ok: true, message: `Note added to ticket #${ticketId}.` };
 }
+
+interface FreshdeskAgent { id: number; contact?: { name?: string } }
+
+// Freshdesk's agent list has no query/search param that works reliably (tried
+// contact.name: field, rejected as invalid) — fetches the full list and matches
+// client-side. 56 agents today; fine for a single in-memory filter, revisit if it grows
+// enough to need pagination. A single get_agent_ticket_count request calls this twice
+// (once in the chat route to build agentNameTokens for the trigger check, once inside
+// findAgentsByName when the tool actually executes) — cached briefly so that's one real
+// API call, not two; the agent roster changing mid-request is not a concern worth the
+// complexity of threading the list through the tool-call boundary instead.
+let agentsCache: { at: number; agents: FreshdeskAgent[] } | null = null;
+const AGENTS_CACHE_TTL_MS = 30_000;
+
+export async function fetchAllAgents(): Promise<FreshdeskAgent[]> {
+  if (agentsCache && Date.now() - agentsCache.at < AGENTS_CACHE_TTL_MS) return agentsCache.agents;
+  if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return [];
+  const res = await fetch(`${baseUrl()}/agents?per_page=100`, { headers: { Authorization: authHeader() } });
+  if (!res.ok) {
+    console.error('Freshdesk fetchAllAgents failed:', res.status, await res.text());
+    return [];
+  }
+  const agents = await res.json() as FreshdeskAgent[];
+  agentsCache = { at: Date.now(), agents };
+  return agents;
+}
+
+async function findAgentsByName(name: string): Promise<FreshdeskAgent[]> {
+  const agents = await fetchAllAgents();
+  const needle = name.trim().toLowerCase();
+  return agents.filter(a => a.contact?.name?.toLowerCase().includes(needle));
+}
+
+// Flat list of individual name tokens (first/last/middle) across every real agent, e.g.
+// "Sahil Parihar" -> ["Sahil", "Parihar"]. Lets the chat route check whether a message
+// actually names a real agent before forcing a per-agent ticket-count tool call — a bare
+// capitalized-word heuristic was tried and rejected on review: ordinary capitalized words
+// (place names, weekdays, months, product/team names) are common enough in real ticket-count
+// questions that "any capitalized word" produces frequent false positives with no real name
+// to fill the tool's required argument. Matching against real names has a much smaller false-
+// positive surface (only an actual agent's own name can match) at the cost of one extra fetch.
+// Several Freshdesk "agents" are actually shared-inbox/team placeholder accounts, not real
+// people — "Integrations Team", "Cred Ops", "Support Buddy", "Engineering Jodo", "Tech ops".
+// Splitting those into individual tokens reintroduces the exact false-positive this function
+// exists to avoid ("Finance team" colliding with the "Team" token from "Integrations Team").
+// Filtering these generic organizational words out leaves only name-shaped tokens, which also
+// means a question about one of these placeholder accounts by its literal name won't force
+// this tool — acceptable, since Manoj asking about a real person is the actual use case.
+// Hardcoded against the live roster as of 2026-10 — re-check against fetchAllAgents() if a
+// new placeholder/shared-inbox account gets added with a different generic word, or this
+// list will silently stop covering it.
+const GENERIC_AGENT_WORDS = new Set([
+  'team', 'ops', 'operations', 'support', 'buddy', 'tech', 'data', 'cred', 'jodo',
+  'engineering', 'integrations', 'integration', 'onboarding', 'banking', 'flex',
+  'site', 'reliability', 'finance', 'product', 'activation',
+]);
+// Residual, accepted risk: a real agent whose surname happens to BE an ordinary English
+// word (e.g. an agent literally named "... Watts") will still force this tool on any message
+// containing that word ("measuring 100 watts of power"), no regex can distinguish the two.
+// Scoped to a worse-case outcome of "wrong tool call returns a clean no-op-ish reply", not a
+// fabrication or data-corruption risk — accepted rather than chased further.
+
+export async function getAgentNameTokens(): Promise<string[]> {
+  const agents = await fetchAllAgents();
+  const tokens = new Set<string>();
+  for (const a of agents) {
+    for (const part of (a.contact?.name ?? '').split(/\s+/)) {
+      if (part.length >= 3 && !GENERIC_AGENT_WORDS.has(part.toLowerCase())) tokens.add(part);
+    }
+  }
+  return [...tokens];
+}
+
+// "X's bucket" / "tickets assigned to X" — count of tickets where X is the owner. This org
+// tracks ticket ownership in TWO decoupled places: Freshdesk's native `agent_id` (responder_id)
+// — which for group-routed tickets is often a shared-inbox placeholder (e.g. "Integrations
+// Team"), not the real human — and a custom field `cf_assigned_to` (plain-text agent name) that
+// the team actually uses for day-to-day ownership and that the "Assigned To" dashboard filter
+// reads. Confirmed via live testing: a ticket can show cf_assigned_to:"Manoj R" while its
+// agent_id points at "Integrations Team" — querying agent_id alone undercounts to 0 on tickets
+// that are real work for that person. OR both fields so neither assignment path is missed.
+// Status 2+3 (Open+Pending) is "open" in the colloquial sense Manoj used — not yet
+// resolved/closed, not literally status=2 only.
+export async function getOpenTicketCountForAgent(agentName: string): Promise<string> {
+  if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return 'Freshdesk not configured.';
+  const matches = await findAgentsByName(agentName);
+  if (!matches.length) return `No Freshdesk agent found matching "${agentName}".`;
+  if (matches.length > 1) {
+    const names = matches.map(a => a.contact?.name).filter(Boolean).join(', ');
+    return `Multiple agents match "${agentName}": ${names}. Which one?`;
+  }
+  const agent = matches[0];
+  // cf_assigned_to is a closed Freshdesk dropdown, not free text — the API validates it
+  // server-side against a fixed ~140-value list (confirmed live via its own 400 error), none
+  // of which contain an apostrophe, so no FQL string-escaping is needed here.
+  const displayName = agent.contact?.name ?? agentName;
+  const query = `(agent_id:${agent.id} OR cf_assigned_to:'${displayName}') AND (status:2 OR status:3)`;
+  const res = await fetch(
+    `${baseUrl()}/search/tickets?query=${encodeURIComponent(`"${query}"`)}`,
+    { headers: { Authorization: authHeader() } }
+  );
+  if (!res.ok) {
+    console.error('Freshdesk getOpenTicketCountForAgent search failed:', res.status, await res.text());
+    return 'Freshdesk ticket count failed.';
+  }
+  const data = await res.json() as { total?: number };
+  return `${agent.contact?.name ?? agentName} has ${data.total ?? 0} open ticket${data.total === 1 ? '' : 's'} (Open + Pending).`;
+}
