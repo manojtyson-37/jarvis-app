@@ -51,6 +51,10 @@
     {
       "path": "/api/cron/sync-gmail",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/reminders",
+      "schedule": "0 * * * *"
     }
   ]
 }

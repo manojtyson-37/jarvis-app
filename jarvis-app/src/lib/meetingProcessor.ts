@@ -227,7 +227,7 @@ export async function processAndSaveMeeting(
       meeting.action_items.map(text => ({ text, meeting_id: meeting.meeting_id, source: 'meeting' as const }))
     );
 
-    await pushMeetingNotification(userId, meeting.title, meeting.action_items.length);
+    await pushMeetingNotification(userId, meeting.meeting_id, meeting.title, meeting.action_items.length);
 
     return meeting;
   } catch (e) {

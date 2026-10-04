@@ -12,7 +12,15 @@ if (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 // Returns true only if at least one subscription actually received the push —
 // callers that gate follow-up state (e.g. "mark as seen/notified") on delivery
 // must not do so if this returns false, or the item becomes permanently invisible.
-export async function sendPush(userId: string, payload: { title: string; body: string; icon?: string; data?: object }): Promise<boolean> {
+//
+// `tag` is read by the service worker's push handler (worker/index.ts) as a top-level
+// field and falls back to a single shared default ('maya-reminder') when omitted — the
+// browser's Notification API replaces any existing notification with the same tag, so
+// two pushes sent close together with no distinct tag silently collapse into one and the
+// earlier item is lost, not just delayed. Always pass a tag unique to the item (a message
+// id, ticket id, reminder id) so concurrent notifications from the same or different
+// sources stack instead of overwriting each other.
+export async function sendPush(userId: string, payload: { title: string; body: string; icon?: string; tag?: string; data?: object }): Promise<boolean> {
   if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) return false;
   const subs = await getPushSubscriptions(userId);
   if (!subs.length) return false;

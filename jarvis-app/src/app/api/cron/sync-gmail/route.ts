@@ -55,6 +55,7 @@ export async function GET(req: Request) {
       const delivered = await sendPush(USER_ID, {
         title: c.automated ? 'Maya · New mail (auto)' : 'Maya · New mail — may need a reply',
         body: `${from} — "${subject}"`,
+        tag: `gmail-${c.id}`,
         data: { prefill: `Show me email ${c.id}` },
       });
 

@@ -27,6 +27,7 @@ export async function GET(req: Request) {
       const delivered = await sendPush(USER_ID, {
         title: 'Maya · New Freshdesk ticket',
         body: `#${t.id} "${t.subject}" — ${PRIORITY_NAMES[t.priority] ?? 'priority unknown'}`,
+        tag: `freshdesk-${t.id}`,
         data: { prefill: `Show me Freshdesk ticket ${t.id}` },
       });
 
