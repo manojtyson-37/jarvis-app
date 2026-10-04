@@ -8,6 +8,34 @@ interface RedashResults {
   };
 }
 
+interface RedashQuerySummary { id: number; name: string; tags?: string[] }
+interface RedashQueryListResponse { count?: number; results?: RedashQuerySummary[] }
+
+// getQueryResults requires already knowing a specific query ID — there was no way to
+// discover what queries actually exist ("what's in my Redash folder"). Redash's own search
+// endpoint covers this; its plain list endpoint also works for a bare browse with no term.
+export async function listQueries(search?: string): Promise<string> {
+  const url = process.env.REDASH_URL;
+  const key = process.env.REDASH_API_KEY;
+  if (!url || !key) return 'Redash not configured.';
+
+  const endpoint = search?.trim()
+    ? `${url}/api/queries/search?q=${encodeURIComponent(search.trim())}`
+    : `${url}/api/queries?page_size=20`;
+  const res = await fetch(endpoint, { headers: { Authorization: `Key ${key}` } });
+  if (!res.ok) return `Redash query list failed: ${res.status}`;
+
+  const data = await res.json() as RedashQuerySummary[] | RedashQueryListResponse;
+  // /search returns a bare array; the plain list endpoint returns {results: [...]}.
+  const queries = Array.isArray(data) ? data : (data.results ?? []);
+  if (!queries.length) return search ? `No Redash queries match "${search}".` : 'No Redash queries found.';
+
+  return queries.slice(0, 20).map(q => {
+    const tags = q.tags?.length ? ` [${q.tags.join(', ')}]` : '';
+    return `#${q.id} "${q.name}"${tags}`;
+  }).join('\n');
+}
+
 export async function getQueryResults(queryId: string): Promise<string> {
   const url = process.env.REDASH_URL;
   const key = process.env.REDASH_API_KEY;

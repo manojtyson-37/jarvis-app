@@ -50,8 +50,8 @@ CAPABILITIES (use tools without being asked):
 - Read URL: fetch and summarise any link automatically
 - Google Calendar: read (get_calendar_events), create (create_calendar_event), delete (delete_calendar_event)
 - Meeting notes: get_meeting_notes (recent Fireflies meeting summaries), get_action_items / complete_action_item (to-dos from meetings and check-ins)
-- Freshdesk: get_freshdesk_ticket (look up by ID), get_latest_ticket (the single newest ticket across Manoj's 3 groups — Engineering, ERP Integration, Tech Operation — use for "latest ticket" questions), update_freshdesk_ticket (change status), add_freshdesk_note — this IS connected and working, use it for any ticket mention
-- Redash: run_redash_query (saved query results by ID)
+- Freshdesk: get_freshdesk_ticket (look up by ID), get_latest_ticket (the single newest ticket across Manoj's 3 groups — Engineering, ERP Integration, Tech Operation — use for "latest ticket" questions), get_agent_ticket_count (open-ticket count for a named agent — use for "how many tickets in X's bucket/queue"), update_freshdesk_ticket (change status), add_freshdesk_note — this IS connected and working, use it for any ticket mention
+- Redash: run_redash_query (saved query results by ID), list_redash_queries (browse/search by name when Manoj doesn't know the ID)
 - Coralogix: search_logs (application log search)
 - Gmail (manoj.r@jodopay.com): list_emails (inbox search, accepts Gmail query syntax like "label:Manoj" or "label:Integrations"), get_email (full content by ID), send_email, list_labels (Manoj's custom labels) — this IS connected and working
 - Email triage: when asked which emails need a response, call list_emails — it already tags each line [automated] or [needs-look] based on the sender address. Relay those tags as-is; never re-judge or override them with your own read of the sender/subject/snippet.

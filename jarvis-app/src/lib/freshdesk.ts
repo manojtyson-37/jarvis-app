@@ -136,10 +136,10 @@ interface FreshdeskAgent { id: number; contact?: { name?: string } }
 // API call, not two; the agent roster changing mid-request is not a concern worth the
 // complexity of threading the list through the tool-call boundary instead.
 let agentsCache: { at: number; agents: FreshdeskAgent[] } | null = null;
-const AGENTS_CACHE_TTL_MS = 30_000;
+const FRESHDESK_CACHE_TTL_MS = 30_000;
 
 export async function fetchAllAgents(): Promise<FreshdeskAgent[]> {
-  if (agentsCache && Date.now() - agentsCache.at < AGENTS_CACHE_TTL_MS) return agentsCache.agents;
+  if (agentsCache && Date.now() - agentsCache.at < FRESHDESK_CACHE_TTL_MS) return agentsCache.agents;
   if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return [];
   const res = await fetch(`${baseUrl()}/agents?per_page=100`, { headers: { Authorization: authHeader() } });
   if (!res.ok) {
@@ -197,6 +197,42 @@ export async function getAgentNameTokens(): Promise<string[]> {
   return [...tokens];
 }
 
+// Exported so the chat route's disambiguation-follow-up check can match against the same
+// literal instead of a hardcoded copy that could silently drift out of sync with this one.
+export const AGENT_DISAMBIGUATION_PREFIX = 'Multiple agents match';
+
+// cf_assigned_to is a closed Freshdesk dropdown (144 choices, confirmed live via
+// GET /ticket_fields) — a DIFFERENT namespace from agents' own Freshdesk account names
+// (contact.name). Confirmed live: 46 of 56 current real agents' contact.name does NOT
+// appear in this choice list at all (name-order swaps, formatting drift — e.g. agent
+// "Srikanth Abbareddy" vs dropdown choice "Abbareddy Srikanth"). Freshdesk validates the
+// enum server-side even inside an OR clause, so querying cf_assigned_to with a value outside
+// this list 400s the WHOLE combined search, not just that half — silently turning a
+// previously-working (if undercounting) agent_id-only lookup into a hard failure for most
+// agents. Must check membership before ever including the clause.
+let assignedToChoicesCache: { at: number; choices: string[] } | null = null;
+
+async function fetchAssignedToChoices(): Promise<string[]> {
+  if (assignedToChoicesCache && Date.now() - assignedToChoicesCache.at < FRESHDESK_CACHE_TTL_MS) {
+    return assignedToChoicesCache.choices;
+  }
+  if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return [];
+  const res = await fetch(`${baseUrl()}/ticket_fields`, { headers: { Authorization: authHeader() } });
+  if (!res.ok) {
+    console.error('Freshdesk fetchAssignedToChoices failed:', res.status, await res.text());
+    return [];
+  }
+  const fields = await res.json() as { name?: string; choices?: unknown }[];
+  const rawChoices = fields.find(f => f.name === 'cf_assigned_to')?.choices;
+  // Defensive: cf_assigned_to is confirmed to be a flat dropdown today, but if Freshdesk ever
+  // returned a non-array shape (e.g. a nested/dependent-field structure) here, `.includes()`
+  // on it downstream would throw instead of safely degrading to "no valid choices" — exactly
+  // the hard-failure class this whole fix exists to avoid.
+  const choices = Array.isArray(rawChoices) ? rawChoices as string[] : [];
+  assignedToChoicesCache = { at: Date.now(), choices };
+  return choices;
+}
+
 // "X's bucket" / "tickets assigned to X" — count of tickets where X is the owner. This org
 // tracks ticket ownership in TWO decoupled places: Freshdesk's native `agent_id` (responder_id)
 // — which for group-routed tickets is often a shared-inbox placeholder (e.g. "Integrations
@@ -209,18 +245,27 @@ export async function getAgentNameTokens(): Promise<string[]> {
 // resolved/closed, not literally status=2 only.
 export async function getOpenTicketCountForAgent(agentName: string): Promise<string> {
   if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return 'Freshdesk not configured.';
+  // Guards against a blank/undefined agent_name reaching findAgentsByName, whose
+  // `.includes('')` substring check would otherwise match every single agent (an empty
+  // string is a substring of everything) and return a bogus "which one?" listing all 56.
+  if (!agentName?.trim()) return 'Which agent?';
   const matches = await findAgentsByName(agentName);
   if (!matches.length) return `No Freshdesk agent found matching "${agentName}".`;
   if (matches.length > 1) {
     const names = matches.map(a => a.contact?.name).filter(Boolean).join(', ');
-    return `Multiple agents match "${agentName}": ${names}. Which one?`;
+    return `${AGENT_DISAMBIGUATION_PREFIX} "${agentName}": ${names}. Which one?`;
   }
   const agent = matches[0];
-  // cf_assigned_to is a closed Freshdesk dropdown, not free text — the API validates it
-  // server-side against a fixed ~140-value list (confirmed live via its own 400 error), none
-  // of which contain an apostrophe, so no FQL string-escaping is needed here.
   const displayName = agent.contact?.name ?? agentName;
-  const query = `(agent_id:${agent.id} OR cf_assigned_to:'${displayName}') AND (status:2 OR status:3)`;
+  // Only fold in cf_assigned_to when the agent's account name is actually one of the
+  // dropdown's valid choices — including it otherwise 400s the entire query (see
+  // fetchAssignedToChoices' comment). Falls back to the agent_id-only query, matching the
+  // pre-existing (if occasionally undercounting) behavior, rather than hard-failing.
+  // None of the real choices contain an apostrophe (checked), so no extra FQL-escaping
+  // is needed for a value that's already confirmed to be a member of this exact list.
+  const assignedToChoices = await fetchAssignedToChoices();
+  const assignedToClause = assignedToChoices.includes(displayName) ? ` OR cf_assigned_to:'${displayName}'` : '';
+  const query = `(agent_id:${agent.id}${assignedToClause}) AND (status:2 OR status:3)`;
   const res = await fetch(
     `${baseUrl()}/search/tickets?query=${encodeURIComponent(`"${query}"`)}`,
     { headers: { Authorization: authHeader() } }

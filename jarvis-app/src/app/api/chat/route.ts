@@ -12,8 +12,8 @@ import {
   logTaskExecution,
 } from '@/lib/supabase';
 import { parseReminderTime } from '@/lib/timeparser';
-import { getTicket, updateTicketStatus, addTicketNote, getLatestTicketInGroups } from '@/lib/freshdesk';
-import { getQueryResults } from '@/lib/redash';
+import { getTicket, updateTicketStatus, addTicketNote, getLatestTicketInGroups, getOpenTicketCountForAgent, getAgentNameTokens, AGENT_DISAMBIGUATION_PREFIX } from '@/lib/freshdesk';
+import { getQueryResults, listQueries } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
 import { listRecentEmails, getEmail, sendEmail, listLabels } from '@/lib/gmail';
 
@@ -242,6 +242,18 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'get_agent_ticket_count',
+      description: "Count how many open Freshdesk tickets are assigned to a specific agent — use for 'how many tickets in X's bucket/queue' type questions.",
+      parameters: {
+        type: 'object',
+        properties: { agent_name: { type: 'string', description: "The agent's name, e.g. \"Sahil Parihar\"" } },
+        required: ['agent_name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'update_freshdesk_ticket',
       description: 'Update the status of a Freshdesk ticket.',
       parameters: {
@@ -275,6 +287,17 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
         type: 'object',
         properties: { query_id: { type: 'string', description: 'The Redash query ID' } },
         required: ['query_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_redash_queries',
+      description: "List or search Manoj's saved Redash queries by name — use when he doesn't know a specific query ID (e.g. 'what Redash queries do I have', 'find the payments query').",
+      parameters: {
+        type: 'object',
+        properties: { search: { type: 'string', description: 'Optional search term to filter by name; omit to list recent queries' } },
       },
     },
   },
@@ -555,6 +578,9 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
     case 'get_latest_ticket':
       return getLatestTicketInGroups();
 
+    case 'get_agent_ticket_count':
+      return getOpenTicketCountForAgent(args.agent_name as string);
+
     case 'update_freshdesk_ticket': {
       const result = await updateTicketStatus(args.ticket_id as string, args.status as string);
       if (result.ok) {
@@ -573,6 +599,9 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
 
     case 'run_redash_query':
       return getQueryResults(args.query_id as string);
+
+    case 'list_redash_queries':
+      return listQueries(args.search as string | undefined);
 
     case 'search_logs': {
       const hours = Math.min(Math.max((args.hours as number) ?? 1, 1), 168);
@@ -650,7 +679,8 @@ const SKIP_NARRATION_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
   'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note',
-  'get_freshdesk_ticket', 'get_latest_ticket', 'list_emails', 'get_email', 'list_labels',
+  'get_freshdesk_ticket', 'get_latest_ticket', 'get_agent_ticket_count', 'list_emails', 'get_email', 'list_labels',
+  'run_redash_query', 'list_redash_queries',
 ]);
 
 export async function POST(req: NextRequest) {
@@ -658,6 +688,22 @@ export async function POST(req: NextRequest) {
   const userId = 'manoj';
 
   if (!message?.trim()) return NextResponse.json({ error: 'Empty message' }, { status: 400 });
+
+  // History is fetched first (not in parallel with the rest) because deciding whether to
+  // fetch agentNameTokens below depends on it — see awaitingAgentDisambiguation.
+  const history = await getConversationHistory(userId, 10);
+  const lastAssistantMsg = history.length ? history[history.length - 1] : null;
+  const awaitingAgentDisambiguationPrompt = lastAssistantMsg?.role === 'assistant'
+    && lastAssistantMsg.content.startsWith(AGENT_DISAMBIGUATION_PREFIX);
+  // The agent list is only fetched when the message could plausibly need it — either it
+  // might be ticket-related at all, or the prior turn asked "which agent did you mean?" and
+  // this message could be answering that — otherwise every casual message (most of them)
+  // would pay for an unnecessary Freshdesk API call just to build a list it'll never use.
+  const mightBeTicketQuestion = /\bticket(s)?\b|\bbucket\b|\bqueue\b/i.test(message);
+  const [memoryFacts, agentNameTokens] = await Promise.all([
+    getMemoryFacts(userId, 20),
+    (mightBeTicketQuestion || awaitingAgentDisambiguationPrompt) ? getAgentNameTokens() : Promise.resolve([] as string[]),
+  ]);
 
   // The model has shown it will sometimes skip calling get_freshdesk_ticket entirely and
   // fabricate a plausible-looking but completely wrong answer (confirmed: finish_reason 'stop'
@@ -687,6 +733,46 @@ export async function POST(req: NextRequest) {
   // other forced-tool regexes below) — a bare "tickets" alone would also force this on
   // "I need two tickets for the concert", an unrelated message with no Freshdesk intent.
   const ticketListMatch = !ticketMatch && /\b(latest|recent|newest|last|new|open|any|support|freshdesk|raised)\b.{0,20}\bticket(s)?\b|\bticket(s)?\b.{0,20}\b(latest|recent|newest|raised|support|freshdesk)\b/i.test(message);
+  // "how many tickets in X's bucket/queue" — a per-agent count, distinct from both the
+  // specific-ID lookup and the single-latest-ticket lookup above. Checked before
+  // ticketListMatch's broader "open"+"ticket" pattern so a count question doesn't get
+  // misrouted to get_latest_ticket (both would otherwise match "tickets are open").
+  // Five review rounds caught real bugs here. Round 1: a bare "how many"+"ticket"
+  // co-occurrence (no name requirement) matched general questions like "how many tickets
+  // are open right now?", hijacking them with nothing to fill the required agent_name param.
+  // Round 2: the round-1 fix (bare two-capitalized-word pattern near "ticket") swung too far
+  // the other way — matched unrelated messages like "I need two tickets for the Ed Sheeran
+  // concert", and separately still missed "how many tickets does Priya have?" (single first
+  // name). Round 3's attempted fix (any capitalized word, not just two in a row) swung back
+  // too far again — ordinary capitalized words (place names, weekdays, months, team/product
+  // names: "tickets open in Mumbai?", "tickets in Engineering?") are common enough in real
+  // ticket-count questions that "any capitalized word" isn't a usable proxy for "names a real
+  // agent" at all. Round 4 switched to checking against the REAL agent list (agentNameTokens)
+  // instead of guessing from capitalization, but two bugs remained: a left-boundary-only regex
+  // match (needed to catch "Parihars" with no apostrophe) let ordinary words PREFIX-collide
+  // ("Nairobi" matching surname token "Nair", "Josephine" matching "Jose"); and the bucket/queue
+  // alternative below had no name requirement at all ("how many tickets are in the queue?"
+  // forced the tool with nothing to fill agent_name). Round 5 fixed both by extracting one
+  // shared, trailing-boundary-safe name-match helper (agentNameMentioned) and requiring it on
+  // EVERY branch, including bucket/queue and the disambiguation-reply check further down —
+  // the earlier version of the disambiguation check used a naive .includes() substring test
+  // instead of this helper, which reintroduced the exact same prefix-collision class through a
+  // different path ("I love balsamic vinegar" matching token "Sam" from an agent's name).
+  // `(?:'s|s)?` allows the possessive-without-apostrophe case this was built for ("Parihars")
+  // while still requiring a real word-break or bare "s" after the name, so "Nair" no longer
+  // matches inside "Nairobi". A real agent whose surname IS an ordinary English word (e.g. an
+  // agent actually named "... Watts") remains a known, accepted residual risk no regex can
+  // close — see the comment on GENERIC_AGENT_WORDS.
+  const agentNameMentioned = (text: string) => agentNameTokens.some(name =>
+    new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:'s|s)?\\b`, 'i').test(text)
+  );
+  const agentCountMatch = !ticketMatch && agentNameMentioned(message) && (
+    /\bticket(s)?\b.{0,40}\b(bucket|queue)\b|\b(bucket|queue)\b.{0,40}\bticket(s)?\b/i.test(message)
+    || (
+      /\bticket(s)?\b/i.test(message)
+      && /\b(how many|number of|count of|assigned to)\b/i.test(message)
+    )
+  );
   // A Gmail message ID is a long hex string — check for one BEFORE the general inbox-check
   // match below, so "show me email <id>" routes to get_email rather than getting swept into
   // the broader "show...email" inbox-check pattern and incorrectly forced to list_emails.
@@ -696,8 +782,41 @@ export async function POST(req: NextRequest) {
   const labelMatch = /\blabels?\b.{0,20}\b(email|gmail|inbox)\b|\b(email|gmail|inbox)\b.{0,20}\blabels?\b/i.test(message);
   const inboxCheckMatch = !emailIdMatch && !labelMatch
     && /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
+  // "redash" is distinctive enough on its own (unlike "ticket") that it doesn't need the
+  // AND-of-two-signals treatment the email/ticket regexes above do — no unrelated casual
+  // message plausibly contains it. A nearby number means a specific known query ID
+  // (run_redash_query); otherwise it's a browse/search request (list_redash_queries), since
+  // run_redash_query was never given its own forced-tool-choice trigger before this and was
+  // exposed to the same skip-and-fabricate risk get_freshdesk_ticket had prior to its fix.
+  // Review caught that a bare "any 2+ digit number anywhere in the message" was too broad —
+  // "redash query about 2024 revenue" and "find the query for Q3 2024 churn" both have no
+  // actual known ID, just an unrelated year, and both wrongly routed to run_redash_query
+  // instead of the search tool. Requires the number to sit immediately after "redash" or
+  // "query" (optionally "id"/"#"/":" in between, nothing else) — a real ID reference like
+  // "query 1234", "redash #1234", "query id 1234" still matches; a descriptive mention with
+  // other words between the keyword and the number does not.
+  const redashMentioned = /\bredash\b/i.test(message);
+  const redashIdMatch = redashMentioned && /\b(?:redash|query)\b\s*(?:id\s*)?#?\s*:?\s*\d+\b/i.test(message);
+  // If the previous assistant turn was get_agent_ticket_count's own "which one?" ambiguity
+  // prompt, the user's reply (e.g. "Manoj R") won't match any regex above — falling through
+  // to tool_choice:'auto' would hit the exact skip-and-fabricate failure mode this whole
+  // forced-tool-choice architecture exists to avoid. Checked LAST, only as a fallback when
+  // nothing else matched — review caught an earlier version of this that was OR'd in at the
+  // TOP of the chain, which meant any unrelated follow-up message (a new ticket number, an
+  // inbox check) got wrongly re-forced into this tool instead of its own correct one for a
+  // full turn after any ambiguity prompt. Also requires the reply to actually name one of the
+  // real agents the prompt offered — review caught that without this, a totally unrelated
+  // reply ("never mind, what's the weather") still got force-routed here just because it
+  // happened to follow the ambiguity prompt, with nothing to fill agent_name. A later review
+  // round caught that the first fix for this used a naive .includes() substring check instead
+  // of the same word-boundary-safe agentNameMentioned() helper used above — reopening the
+  // identical prefix-collision bug through a different path ("I love balsamic vinegar"
+  // matching token "Sam" from an unrelated agent's name). Reuses the shared helper instead.
+  const awaitingAgentDisambiguation = awaitingAgentDisambiguationPrompt && agentNameMentioned(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
+    : agentCountMatch
+    ? { type: 'function' as const, function: { name: 'get_agent_ticket_count' } }
     : ticketListMatch
     ? { type: 'function' as const, function: { name: 'get_latest_ticket' } }
     : emailIdMatch
@@ -706,12 +825,14 @@ export async function POST(req: NextRequest) {
         ? { type: 'function' as const, function: { name: 'list_labels' } }
         : inboxCheckMatch
           ? { type: 'function' as const, function: { name: 'list_emails' } }
-          : 'auto' as const;
+          : redashIdMatch
+            ? { type: 'function' as const, function: { name: 'run_redash_query' } }
+            : redashMentioned
+              ? { type: 'function' as const, function: { name: 'list_redash_queries' } }
+              : awaitingAgentDisambiguation
+                ? { type: 'function' as const, function: { name: 'get_agent_ticket_count' } }
+                : 'auto' as const;
 
-  const [history, memoryFacts] = await Promise.all([
-    getConversationHistory(userId, 10),
-    getMemoryFacts(userId, 20),
-  ]);
   await appendConversation(userId, 'user', message);
 
   const encoder = new TextEncoder();
