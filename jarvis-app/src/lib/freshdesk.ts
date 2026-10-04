@@ -30,13 +30,16 @@ export interface FreshdeskTicketSummary {
   subject: string;
   status: number;
   priority: number;
+  requester?: { name?: string; email?: string };
 }
 
 // "new_and_my_open" is a Freshdesk built-in filter scoped to the authenticated
-// agent's own tickets — no separate agent-ID lookup needed.
+// agent's own tickets — no separate agent-ID lookup needed. include=requester embeds
+// the requester inline (confirmed working on this filtered endpoint too, not just the
+// single-ticket show endpoint) so callers don't need a second lookup per ticket.
 export async function listMyOpenTickets(): Promise<FreshdeskTicketSummary[]> {
   if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return [];
-  const res = await fetch(`${baseUrl()}/tickets?filter=new_and_my_open&order_by=created_at&order_type=desc`, {
+  const res = await fetch(`${baseUrl()}/tickets?filter=new_and_my_open&order_by=created_at&order_type=desc&include=requester`, {
     headers: { Authorization: authHeader() },
   });
   if (!res.ok) {
@@ -45,6 +48,37 @@ export async function listMyOpenTickets(): Promise<FreshdeskTicketSummary[]> {
   }
   const data = await res.json() as FreshdeskTicketSummary[];
   return data;
+}
+
+// Manoj's own agent profile has an empty group_ids (not a formal member of any group via
+// that field), so "the latest ticket" can't be derived from his profile — he specified these
+// 3 groups directly: Team Engineering, Team ERP Integration, Team Tech Operation.
+const LATEST_TICKET_GROUP_IDS = [88000150786, 88000150785, 88000112496];
+
+export async function getLatestTicketInGroups(): Promise<string> {
+  if (!process.env.FRESHDESK_API_KEY || !process.env.FRESHDESK_DOMAIN) return 'Freshdesk not configured.';
+  // The regular /tickets list endpoint has no group_id filter; Freshdesk's search API
+  // supports arbitrary field queries via FQL. Confirmed live: results come back sorted
+  // newest-first by created_at with no explicit order_by needed, and `include=requester`
+  // is NOT supported here (only 'company' is) — so this call only finds the latest ticket
+  // ID, then hands off to getTicket() for the full requester-resolved, formatted detail.
+  const query = LATEST_TICKET_GROUP_IDS.map(id => `group_id:${id}`).join(' OR ');
+  const res = await fetch(
+    `${baseUrl()}/search/tickets?query=${encodeURIComponent(`"${query}"`)}`,
+    { headers: { Authorization: authHeader() } }
+  );
+  if (!res.ok) {
+    console.error('Freshdesk getLatestTicketInGroups search failed:', res.status, await res.text());
+    return 'Freshdesk ticket search failed.';
+  }
+  const data = await res.json() as { results?: { id: number }[] };
+  if (!data.results?.length) return 'No tickets found in the Engineering / ERP Integration / Tech Operation groups.';
+  // Don't just trust results[0] — the search API's newest-first ordering was confirmed
+  // empirically, not via any documented order_by guarantee. Freshdesk ticket IDs are
+  // monotonically increasing per account, so sorting by ID client-side gets the true
+  // latest regardless of whatever order the API actually returns.
+  const latest = data.results.reduce((max, t) => (t.id > max.id ? t : max));
+  return getTicket(String(latest.id));
 }
 
 export async function getTicket(ticketId: string): Promise<string> {

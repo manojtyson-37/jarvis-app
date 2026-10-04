@@ -12,7 +12,7 @@ import {
   logTaskExecution,
 } from '@/lib/supabase';
 import { parseReminderTime } from '@/lib/timeparser';
-import { getTicket, updateTicketStatus, addTicketNote } from '@/lib/freshdesk';
+import { getTicket, updateTicketStatus, addTicketNote, getLatestTicketInGroups } from '@/lib/freshdesk';
 import { getQueryResults } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
 import { listRecentEmails, getEmail, sendEmail, listLabels } from '@/lib/gmail';
@@ -229,6 +229,14 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
         properties: { ticket_id: { type: 'string', description: 'The Freshdesk ticket number' } },
         required: ['ticket_id'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_latest_ticket',
+      description: "Get the full details of the single most recently raised Freshdesk ticket, scoped to Manoj's 3 groups (Engineering, ERP Integration, Tech Operation) — use for 'latest ticket' type questions.",
+      parameters: { type: 'object', properties: {} },
     },
   },
   {
@@ -544,6 +552,9 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
     case 'get_freshdesk_ticket':
       return getTicket(args.ticket_id as string);
 
+    case 'get_latest_ticket':
+      return getLatestTicketInGroups();
+
     case 'update_freshdesk_ticket': {
       const result = await updateTicketStatus(args.ticket_id as string, args.status as string);
       if (result.ok) {
@@ -639,7 +650,7 @@ const SKIP_NARRATION_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
   'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note',
-  'get_freshdesk_ticket', 'list_emails', 'get_email', 'list_labels',
+  'get_freshdesk_ticket', 'get_latest_ticket', 'list_emails', 'get_email', 'list_labels',
 ]);
 
 export async function POST(req: NextRequest) {
@@ -667,6 +678,15 @@ export async function POST(req: NextRequest) {
   // instead, matching the ticket pattern, and narrow the trigger to inbox-check phrasing (not
   // bare "email" — that would wrongly also fire on "what's my email address").
   const ticketMatch = /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
+  // "latest ticket raised" / "any new tickets" — a recency question, distinct from a
+  // specific-ID lookup (ticketMatch always wins when a real number is present). Routes to
+  // get_latest_ticket, which returns full detail on the single newest ticket across Manoj's
+  // 3 groups (Engineering / ERP Integration / Tech Operation) — there is no separate
+  // "list all my tickets" tool, so any ticket-recency phrasing resolves to this.
+  // Requires a recency/support word co-occurring with "ticket(s)" (same AND-shape as the
+  // other forced-tool regexes below) — a bare "tickets" alone would also force this on
+  // "I need two tickets for the concert", an unrelated message with no Freshdesk intent.
+  const ticketListMatch = !ticketMatch && /\b(latest|recent|newest|last|new|open|any|support|freshdesk|raised)\b.{0,20}\bticket(s)?\b|\bticket(s)?\b.{0,20}\b(latest|recent|newest|raised|support|freshdesk)\b/i.test(message);
   // A Gmail message ID is a long hex string — check for one BEFORE the general inbox-check
   // match below, so "show me email <id>" routes to get_email rather than getting swept into
   // the broader "show...email" inbox-check pattern and incorrectly forced to list_emails.
@@ -678,6 +698,8 @@ export async function POST(req: NextRequest) {
     && /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
+    : ticketListMatch
+    ? { type: 'function' as const, function: { name: 'get_latest_ticket' } }
     : emailIdMatch
       ? { type: 'function' as const, function: { name: 'get_email' } }
       : labelMatch
