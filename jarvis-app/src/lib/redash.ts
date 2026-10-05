@@ -20,14 +20,13 @@ export async function listQueries(search?: string): Promise<string> {
   if (!url || !key) return 'Redash not configured.';
 
   const endpoint = search?.trim()
-    ? `${url}/api/queries/search?q=${encodeURIComponent(search.trim())}`
+    ? `${url}/api/queries?q=${encodeURIComponent(search.trim())}&page_size=20`
     : `${url}/api/queries?page_size=20`;
   const res = await fetch(endpoint, { headers: { Authorization: `Key ${key}` } });
   if (!res.ok) return `Redash query list failed: ${res.status}`;
 
-  const data = await res.json() as RedashQuerySummary[] | RedashQueryListResponse;
-  // /search returns a bare array; the plain list endpoint returns {results: [...]}.
-  const queries = Array.isArray(data) ? data : (data.results ?? []);
+  const data = await res.json() as RedashQueryListResponse;
+  const queries = data.results ?? [];
   if (!queries.length) return search ? `No Redash queries match "${search}".` : 'No Redash queries found.';
 
   return queries.slice(0, 20).map(q => {
