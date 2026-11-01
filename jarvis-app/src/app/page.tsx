@@ -14,6 +14,22 @@ interface Message {
   ts: Date;
 }
 
+interface PendingAction { id: string; tool: string; summary: string; created_at: string; hash: string; detail?: string; long?: boolean; }
+
+// Whole-utterance only. Approval needs a deliberate word ("approve"/"confirm") — never "yes", "ok"
+// or "do it", which open-mic background speech or casual chat could trigger. Rejecting is safe, so it stays broad.
+function voiceVerdict(text: string): 'approve' | 'reject' | null {
+  const t = text.toLowerCase().replace(/[^a-z' ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t || t.split(' ').length > 4) return null;
+  if (/^(approve|approved|confirm|confirmed)( it| that)?$/.test(t)) return 'approve';
+  if (/^(cancel|reject|discard|never mind|nevermind)( it| that)?$/.test(t)) return 'reject';
+  return null;
+}
+
+function plainForSpeech(text: string): string {
+  return text.replace(/```[\s\S]*?```/g, ' ').replace(/https?:\/\/\S+/g, 'link').replace(/[*_`#>\[\]()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 600);
+}
+
 interface Note { id: string; content: string; tags: string[]; created_at: string; }
 interface Reminder { id: string; text: string; remind_at: string; fired: boolean; }
 interface Workout { id: string; type: string; duration_min?: number; notes?: string; logged_at: string; }
@@ -58,6 +74,14 @@ export default function MayaPage() {
   const recognitionRef = useRef<{ stop: () => void } | null>(null);
   const shouldListenRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [pending, setPending] = useState<PendingAction[]>([]);
+  const pendingRef = useRef<PendingAction[]>([]);
+  const [handsFree, setHandsFree] = useState(false);
+  const handsFreeRef = useRef(false);
+  const decidingRef = useRef(false);
+  const [deciding, setDeciding] = useState(false);
+  const startListeningRef = useRef<() => void>(() => {});
+  const stopListeningRef = useRef<(a?: 'cancel' | 'pause' | 'send') => void>(() => {});
 
   const [notes, setNotes] = useState<Note[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
@@ -161,8 +185,104 @@ export default function MayaPage() {
     if (tab !== 'chat') loadDashboard();
   }, [tab, loadDashboard]);
 
+  const loadPending = useCallback(async () => {
+    try {
+      const res = await fetch('/api/actions');
+      if (!res.ok) return;
+      const { actions } = await res.json() as { actions: PendingAction[] };
+      pendingRef.current = actions;
+      setPending(actions);
+    } catch { /* offline — keep last known list */ }
+  }, []);
+
+  useEffect(() => {
+    loadPending();
+    const t = setInterval(loadPending, 15000);
+    return () => clearInterval(t);
+  }, [loadPending]);
+
+  // Speak a reply, then (hands-free) reopen the mic so the conversation keeps flowing.
+  const speak = useCallback((text: string) => {
+    if (!handsFreeRef.current) return;
+    // onend is unreliable on some mobile browsers, so a timer backs it up; resume only once.
+    let resumed = false;
+    const resume = () => {
+      if (resumed) return;
+      resumed = true;
+      if (handsFreeRef.current) startListeningRef.current();
+    };
+    const synth = typeof window !== 'undefined' ? window.speechSynthesis : undefined;
+    const clean = plainForSpeech(text);
+    if (!synth || !clean) { resume(); return; }
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(clean);
+    u.lang = 'en-IN';
+    u.onend = resume;
+    u.onerror = resume;
+    synth.speak(u);
+    setTimeout(resume, Math.min(60000, 4000 + clean.length * 90));
+  }, []);
+
+  const decide = useCallback(async (action: PendingAction, decision: 'approve' | 'reject') => {
+    // One decision at a time: a second tap or an echoed word must not resolve a different action.
+    if (decidingRef.current) return;
+    decidingRef.current = true;
+    setDeciding(true);
+    try {
+      let message: string;
+      try {
+        const res = await fetch(`/api/actions/${action.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          // The server only runs the action if the hash of its FULL content still equals the one on this card.
+          body: JSON.stringify({ decision, hash: action.hash }),
+        });
+        message = ((await res.json()) as { message?: string }).message ?? 'Done.';
+      } catch {
+        message = 'Could not reach the server. Nothing was changed.';
+      }
+      setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: message, ts: new Date() }]);
+      await loadPending();
+      const left = pendingRef.current;
+      speak(
+        left.length === 1 && left[0].long ? `${message} Next one has long text. Open Full text on screen and tap Approve.`
+        : left.length === 1 ? `${message} Next: ${left[0].summary}. Say approve or cancel.`
+        : left.length > 1 ? `${message} ${left.length} more are waiting. Use the buttons on screen.`
+        : message,
+      );
+    } finally {
+      decidingRef.current = false;
+      setDeciding(false);
+    }
+  }, [loadPending, speak]);
+
   const send = useCallback(async (text: string) => {
     if (!text.trim() || loading) return;
+
+    // Spoken yes/no resolves the oldest pending action directly — it never goes through the
+    // model, so the model cannot approve (or be talked into approving) its own actions.
+    const verdict = voiceVerdict(text);
+    if (verdict && pendingRef.current.length > 0) {
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: text.trim(), ts: new Date() }]);
+      setInput('');
+      // Only resolve by voice when exactly one action is waiting, so the word can only mean that one.
+      // With several waiting (an old one, a duplicate, an injected one) the buttons are required.
+      // A long email/note can't be fully heard or seen in the spoken summary, so it needs the on-screen button.
+      if (verdict === 'approve' && pendingRef.current.length === 1 && pendingRef.current[0].long) {
+        const msg = 'That one has long text I can\'t read out in full — open Full text and tap Approve.';
+        setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: msg, ts: new Date() }]);
+        speak(msg);
+        return;
+      }
+      if (pendingRef.current.length !== 1) {
+        const msg = `${pendingRef.current.length} actions are waiting — use the Approve / Cancel buttons so I don't pick the wrong one.`;
+        setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: msg, ts: new Date() }]);
+        speak(msg);
+        return;
+      }
+      await decide(pendingRef.current[0], verdict);
+      return;
+    }
     const userMsg: Message = { id: Date.now().toString(), role: 'user', content: text.trim(), ts: new Date() };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
@@ -216,20 +336,31 @@ export default function MayaPage() {
         setMessages(prev => prev.map(m =>
           m.id === assistantId ? { ...m, content: 'Something went wrong. Try again.' } : m
         ));
+        speak('Something went wrong. Try again.');
+      } else {
+        speak(fullContent);
       }
     } catch (e) {
       setMessages(prev => prev.map(m =>
         m.id === assistantId ? { ...m, content: `Error: ${(e as Error).message}` } : m
       ));
+      speak('Something went wrong. Try again.');
     } finally {
       setLoading(false);
+      loadPending();
     }
-  }, [loading]);
+  }, [loading, decide, speak, loadPending]);
 
   const stopListening = useCallback((action: 'cancel' | 'pause' | 'send' = 'pause') => {
     shouldListenRef.current = false;
     recognitionRef.current?.stop();
     setListening(false);
+    if (action === 'cancel') {
+      // Cancelling the mic also ends hands-free, otherwise the next spoken reply would reopen it.
+      handsFreeRef.current = false;
+      setHandsFree(false);
+      window.speechSynthesis?.cancel();
+    }
     const final = transcriptRef.current;
     setTranscript('');
     transcriptRef.current = '';
@@ -240,7 +371,10 @@ export default function MayaPage() {
     }
   }, [send]);
 
+  stopListeningRef.current = stopListening;
+
   const startListening = useCallback(() => {
+    window.speechSynthesis?.cancel();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const w = window as any;
     const SpeechRecognition = w.SpeechRecognition ?? w.webkitSpeechRecognition;
@@ -273,6 +407,11 @@ export default function MayaPage() {
 
       recognition.onend = () => {
         if (!shouldListenRef.current) return;
+        // Hands-free: the recognizer ended after the user stopped talking — send what was said.
+        if (handsFreeRef.current && transcriptRef.current.trim()) {
+          stopListeningRef.current('send');
+          return;
+        }
         // 250ms delay drains the mic buffer before next session — prevents overlap
         setTimeout(() => {
           if (shouldListenRef.current) {
@@ -286,12 +425,29 @@ export default function MayaPage() {
         if (e.error === 'aborted' || e.error === 'no-speech') return;
         shouldListenRef.current = false;
         setListening(false);
+        // A real mic error (permission, network) must not leave "Hands-free ON" showing with a dead mic.
+        handsFreeRef.current = false;
+        setHandsFree(false);
       };
       recognitionRef.current = { stop: () => recognition.abort() };
       recognition.start();
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     launch(SpeechRecognition as unknown as new () => any);
+  }, []);
+  startListeningRef.current = startListening;
+
+  const toggleHandsFree = useCallback(() => {
+    if (handsFreeRef.current) {
+      handsFreeRef.current = false;
+      setHandsFree(false);
+      window.speechSynthesis?.cancel();
+      stopListeningRef.current('cancel');
+    } else {
+      handsFreeRef.current = true;
+      setHandsFree(true);
+      startListeningRef.current();
+    }
   }, []);
 
   async function logout() {
@@ -376,6 +532,35 @@ export default function MayaPage() {
               <div ref={bottomRef} />
             </div>
 
+            {pending.length > 0 && (
+              <div className="px-3 pt-2 space-y-2 border-t border-zinc-800 bg-zinc-900">
+                {pending.map((a, i) => (
+                  <div key={a.id} className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-wide text-amber-400">
+                      Needs your approval{pending.length === 1 && i === 0 && !a.long && ' — say "approve" or "cancel"'}
+                    </p>
+                    <p className="text-sm text-zinc-100 mt-0.5 break-words">{a.summary}</p>
+                    {a.detail && (
+                      <details className="mt-1">
+                        <summary className="text-xs text-amber-300 cursor-pointer">Full text{a.long ? ` (${a.detail.length} characters)` : ''}</summary>
+                        <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-zinc-300">{a.detail}</pre>
+                      </details>
+                    )}
+                    <div className="flex gap-2 mt-2">
+                      <button disabled={deciding} onClick={() => decide(a, 'approve')}
+                        className="flex-1 rounded-lg bg-emerald-600 py-1.5 text-sm font-medium text-white active:scale-95 transition-transform">
+                        Approve
+                      </button>
+                      <button disabled={deciding} onClick={() => decide(a, 'reject')}
+                        className="flex-1 rounded-lg bg-zinc-700 py-1.5 text-sm text-zinc-200 active:scale-95 transition-transform">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {listening ? (
               /* ── Recording bar ── */
               <div className="px-3 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center gap-2">
@@ -409,6 +594,12 @@ export default function MayaPage() {
             ) : (
               /* ── Default input bar ── */
               <div className="px-3 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center gap-2">
+                <button onClick={toggleHandsFree} title="Hands-free voice conversation"
+                  className={`h-10 px-3 rounded-full text-xs font-medium shrink-0 active:scale-95 transition-all ${
+                    handsFree ? 'bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-400'
+                  }`}>
+                  {handsFree ? 'Hands-free ON' : 'Hands-free'}
+                </button>
                 <input
                   className="flex-1 bg-zinc-800 text-zinc-100 text-sm rounded-full px-4 py-2.5 outline-none placeholder:text-zinc-500"
                   placeholder="Type a message..."

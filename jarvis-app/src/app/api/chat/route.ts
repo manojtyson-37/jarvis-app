@@ -9,13 +9,14 @@ import {
   logFinance, getFinanceSummary,
   getMemoryFacts,
   getMeetingNotes, getPendingActionItems, completeActionItem,
-  logTaskExecution,
 } from '@/lib/supabase';
 import { parseReminderTime } from '@/lib/timeparser';
 import { getTicket, updateTicketStatus, addTicketNote, getLatestTicketInGroups, getOpenTicketCountForAgent, getAgentNameTokens, AGENT_DISAMBIGUATION_PREFIX } from '@/lib/freshdesk';
 import { getQueryResults, listQueries } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
-import { listRecentEmails, getEmail, sendEmail, listLabels } from '@/lib/gmail';
+import { listRecentEmails, getEmail, listLabels } from '@/lib/gmail';
+import { GATED_TOOLS, queueAction } from '@/lib/actions';
+import { getGoogleAccessToken } from '@/lib/google';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -369,6 +370,9 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
 ];
 
 async function executeTool(name: string, args: Record<string, unknown>, userId: string): Promise<string> {
+  // Tiered approval: outward-facing/irreversible tools never run here — they are queued and
+  // only the session-gated /api/actions/[id] endpoint can execute them.
+  if (GATED_TOOLS.has(name)) return queueAction(userId, name, args);
   switch (name) {
     case 'save_note':
       await saveNote(userId, args.content as string, (args.tags as string[]) ?? []);
@@ -515,37 +519,6 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
       }).join('\n');
     }
 
-    case 'create_calendar_event': {
-      const token = await getGoogleAccessToken();
-      if (!token) return 'Google Calendar not configured.';
-      const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          summary: args.title,
-          description: args.description ?? '',
-          start: { dateTime: args.start, timeZone: 'Asia/Kolkata' },
-          end: { dateTime: args.end, timeZone: 'Asia/Kolkata' },
-        }),
-      });
-      if (!res.ok) return `Failed to create event: ${res.status}`;
-      const ev = await res.json() as { id?: string; summary: string; htmlLink: string };
-      return `Event created: "${ev.summary}" (id: ${ev.id ?? '(unavailable)'}) — ${ev.htmlLink}`;
-    }
-
-    case 'delete_calendar_event': {
-      if (!args.event_id) return 'event_id is required to delete an event.';
-      const token = await getGoogleAccessToken();
-      if (!token) return 'Google Calendar not configured.';
-      const res = await fetch(
-        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(args.event_id as string)}`,
-        { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (res.ok) return 'Event deleted.';
-      if (res.status === 404 || res.status === 410) return 'Event not found — it may have already been deleted.';
-      return `Failed to delete event: ${res.status}`;
-    }
-
     case 'get_meeting_notes': {
       const meetings = await getMeetingNotes(userId, (args.limit as number) ?? 3);
       if (!meetings.length) return 'No meeting notes yet. Meetings will appear here once Fireflies processes them.';
@@ -581,22 +554,6 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
     case 'get_agent_ticket_count':
       return getOpenTicketCountForAgent(args.agent_name as string);
 
-    case 'update_freshdesk_ticket': {
-      const result = await updateTicketStatus(args.ticket_id as string, args.status as string);
-      if (result.ok) {
-        await logTaskExecution(userId, 'freshdesk', result.message, { ticket_id: args.ticket_id, status: args.status });
-      }
-      return result.message;
-    }
-
-    case 'add_freshdesk_note': {
-      const result = await addTicketNote(args.ticket_id as string, args.note as string);
-      if (result.ok) {
-        await logTaskExecution(userId, 'freshdesk', result.message, { ticket_id: args.ticket_id, note: args.note });
-      }
-      return result.message;
-    }
-
     case 'run_redash_query':
       return getQueryResults(args.query_id as string);
 
@@ -614,42 +571,11 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
     case 'get_email':
       return getEmail(args.message_id as string);
 
-    case 'send_email': {
-      const result = await sendEmail(args.to as string, args.subject as string, args.body as string);
-      if (result.ok) {
-        await logTaskExecution(userId, 'email', result.message, { to: args.to, subject: args.subject });
-      }
-      return result.message;
-    }
-
     case 'list_labels':
       return listLabels();
 
     default:
       return `Unknown tool: ${name}`;
-  }
-}
-
-async function getGoogleAccessToken(): Promise<string | null> {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) return null;
-  try {
-    const res = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }),
-    });
-    if (!res.ok) {
-      console.error('Google token refresh failed:', res.status, await res.text());
-      return null;
-    }
-    const data = await res.json() as { access_token?: string };
-    return data.access_token ?? null;
-  } catch (e) {
-    console.error('Google token fetch error:', (e as Error).message);
-    return null;
   }
 }
 
@@ -668,8 +594,9 @@ export async function GET() {
 //      ignoring that real result, since that pass still runs with tool_choice:'auto'. Skipping
 //      it entirely for these tools removes the fabrication opportunity structurally rather than
 //      relying on a prompt instruction the model has already shown it won't reliably follow.
-// send_email is deliberately NOT here — narration for an already-sent email is just reporting
-// what happened, with no real data to override, so there's no equivalent risk to avoid.
+// send_email and the other gated tools ARE here now: they only queue an approval request, so the
+// raw "Waiting for your approval: ..." text must reach the user verbatim — a narration pass could
+// wrongly claim the action already happened.
 // KNOWN GAP, not closed by this set: a turn where the model calls one of these tools ALONGSIDE
 // a tool NOT in this set (e.g. get_freshdesk_ticket + get_calendar_events together) falls through
 // to the normal narration path below with tool_choice:'auto' — the exact same unresolved
@@ -678,7 +605,7 @@ export async function GET() {
 const SKIP_NARRATION_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
-  'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note',
+  'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note', 'send_email', 'create_calendar_event',
   'get_freshdesk_ticket', 'get_latest_ticket', 'get_agent_ticket_count', 'list_emails', 'get_email', 'list_labels',
   'run_redash_query', 'list_redash_queries',
 ]);
@@ -884,6 +811,7 @@ export async function POST(req: NextRequest) {
           const toolCalls = response.choices[0].message.tool_calls ?? [];
           const toolResults: Groq.Chat.ChatCompletionMessageParam[] = [];
           const fastResults: string[] = [];
+          const queuedNotes: string[] = []; // gated-tool queue text, appended verbatim in mixed turns
 
           for (const tc of toolCalls) {
             let result: string;
@@ -893,6 +821,7 @@ export async function POST(req: NextRequest) {
               result = `Tool error: ${(e as Error).message}`;
             }
             toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
+            if (GATED_TOOLS.has(tc.function.name)) queuedNotes.push(result);
             if (SKIP_NARRATION_TOOLS.has(tc.function.name)) fastResults.push(result);
           }
 
@@ -936,6 +865,13 @@ export async function POST(req: NextRequest) {
 
             fullReply = fullReply.trim();
             fullReply = fullReply.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
+            // The narration pass can wrongly say a queued action already happened — state the real status.
+            if (queuedNotes.length) {
+              const tail = `\n\n${queuedNotes.join('\n')}`;
+              fullReply += tail;
+              controller.enqueue(sseChunk(tail));
+              chunksEmitted++;
+            }
             if (!fullReply) fullReply = 'Something went wrong on my end. Try again.';
             await appendConversation(userId, 'assistant', fullReply).catch(() => {});
             if (chunksEmitted === 0) emit(fullReply); // nothing streamed yet, emit now
@@ -943,7 +879,9 @@ export async function POST(req: NextRequest) {
             return;
           } catch (e) {
             console.error('Groq stream (post-tool) failed:', (e as Error).message);
-            const errMsg = 'Done, but had trouble composing the response. Try asking again.';
+            const errMsg = queuedNotes.length
+              ? `Queued, not done yet. ${queuedNotes.join('\n')}`
+              : 'Done, but had trouble composing the response. Try asking again.';
             await appendConversation(userId, 'assistant', errMsg).catch(() => {});
             emit(errMsg);
             close();

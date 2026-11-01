@@ -334,7 +334,7 @@ export async function completeActionItem(userId: string, itemId: string): Promis
 
 export async function logTaskExecution(
   userId: string,
-  actionType: 'freshdesk' | 'redash' | 'coralogix' | 'email',
+  actionType: 'freshdesk' | 'redash' | 'coralogix' | 'email' | 'calendar',
   description: string,
   payload?: object
 ) {
