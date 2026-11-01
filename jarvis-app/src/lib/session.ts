@@ -2,6 +2,7 @@ export const SESSION_COOKIE = 'maya_session';
 export const SESSION_MAX_AGE = 30 * 24 * 60 * 60; // 30 days in seconds
 
 export async function createSessionToken(secret: string): Promise<string> {
+  if (!secret) throw new Error('session secret not configured');
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(secret),
@@ -17,6 +18,7 @@ export async function createSessionToken(secret: string): Promise<string> {
 }
 
 export async function verifySessionToken(token: string, secret: string): Promise<boolean> {
+  if (!secret) return false; // an empty key must never validate a token
   try {
     const [tsB64, sigB64] = token.split('.');
     if (!tsB64 || !sigB64) return false;
