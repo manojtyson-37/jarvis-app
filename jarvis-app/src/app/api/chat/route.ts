@@ -16,6 +16,7 @@ import { getQueryResults, listQueries } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
 import { listRecentEmails, getEmail, listLabels } from '@/lib/gmail';
 import { searchDrive, readDriveFile } from '@/lib/drive';
+import { forModel, gmailLookupIntent } from '@/lib/chatContext';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { getGoogleAccessToken } from '@/lib/google';
 
@@ -741,8 +742,10 @@ export async function POST(req: NextRequest) {
   // Scoped to email/Gmail context, not bare "label" — otherwise "what label would you give
   // this idea" or "add a label to this note" would wrongly force a Gmail tool call too.
   const labelMatch = /\blabels?\b.{0,20}\b(email|gmail|inbox)\b|\b(email|gmail|inbox)\b.{0,20}\blabels?\b/i.test(message);
+  // "gmail" (without send/draft/reply/redash intent) forces the read-only lookup: "I connected my gmail account" matched
+  // nothing, so the model answered from stale chat history (old Jodo lists) instead of checking the inbox.
   const inboxCheckMatch = !emailIdMatch && !labelMatch
-    && /\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message);
+    && (/\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message) || gmailLookupIntent(message));
   // "redash" is distinctive enough on its own (unlike "ticket") that it doesn't need the
   // AND-of-two-signals treatment the email/ticket regexes above do — no unrelated casual
   // message plausibly contains it. A nearby number means a specific known query ID
@@ -817,7 +820,7 @@ export async function POST(req: NextRequest) {
       // Top-level net: any unhandled throw settles the controller so the stream is never leaked
       (async () => {
         const msgs: Groq.Chat.ChatCompletionMessageParam[] = [
-          ...history.map((h: { role: 'user' | 'assistant'; content: string }) => ({ role: h.role, content: h.content })),
+          ...history.map((h: { role: 'user' | 'assistant'; content: string }) => ({ role: h.role, content: forModel(h.role, h.content) })),
           { role: 'user', content: message },
         ];
 
