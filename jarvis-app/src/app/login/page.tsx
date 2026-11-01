@@ -20,6 +20,9 @@ export default function LoginPage() {
       });
       if (res.ok) {
         router.replace('/');
+      } else if (res.status === 429 || res.status === 503) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        setError(data.error ?? 'Try again shortly.');
       } else {
         setError('Wrong password.');
       }
