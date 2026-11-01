@@ -9,26 +9,56 @@
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   overscroll-behavior: none;
 }
 
 ::-webkit-scrollbar { display: none; }
 
-@keyframes pulse-ring {
-  0% { transform: scale(1); opacity: 1; }
-  100% { transform: scale(1.6); opacity: 0; }
-}
+/* Markdown inside assistant messages (the typography plugin is not installed, so style it here). */
+.md { font-size: 0.9375rem; line-height: 1.65; color: #e4e4e7; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0.6em 0; }
+.md strong { color: #fafafa; font-weight: 600; }
+.md ul, .md ol { margin: 0.6em 0; padding-left: 1.4em; }
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
+.md li { margin: 0.25em 0; }
+.md h1, .md h2, .md h3 { color: #fafafa; font-weight: 600; margin: 1em 0 0.4em; line-height: 1.3; }
+.md h1 { font-size: 1.2em; } .md h2 { font-size: 1.1em; } .md h3 { font-size: 1em; }
+.md a { color: #a5b4fc; text-decoration: underline; text-underline-offset: 2px; }
+.md code { background: rgba(255,255,255,0.08); padding: 0.1em 0.35em; border-radius: 6px; font-size: 0.875em; }
+.md pre { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); padding: 0.75em 1em; border-radius: 12px; overflow-x: auto; margin: 0.7em 0; }
+.md pre code { background: none; padding: 0; }
+.md blockquote { border-left: 3px solid rgba(255,255,255,0.15); margin: 0.7em 0; padding-left: 0.9em; color: #a1a1aa; }
+.md table { border-collapse: collapse; width: 100%; font-size: 0.875em; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid rgba(255,255,255,0.1); padding: 0.4em 0.7em; text-align: left; }
+.md hr { border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 1em 0; }
 
-.pulse-ring {
-  animation: pulse-ring 1.2s ease-out infinite;
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(1.7); opacity: 0; }
 }
+.pulse-ring { animation: pulse-ring 1.4s ease-out infinite; }
 
 @keyframes dots {
-  0%, 80%, 100% { opacity: 0; }
+  0%, 80%, 100% { opacity: 0.2; }
   40% { opacity: 1; }
 }
-
 .dot-1 { animation: dots 1.2s 0s infinite; }
 .dot-2 { animation: dots 1.2s 0.2s infinite; }
 .dot-3 { animation: dots 1.2s 0.4s infinite; }
+
+@keyframes bar {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+.bar { animation: bar 1s ease-in-out infinite; transform-origin: center; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-ring, .dot-1, .dot-2, .dot-3, .bar { animation: none; }
+  * { transition-duration: 0.01ms !important; }
+}
+
+/* Keep the composer clear of the iOS home indicator. */
+.safe-bottom { padding-bottom: max(0.75rem, env(safe-area-inset-bottom)); }
