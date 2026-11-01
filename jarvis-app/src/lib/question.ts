@@ -6,7 +6,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const QUESTION_AREAS = [
   'morning routine and energy patterns across the day',
-  'work priorities at Jodo and what frustrates you most as PM',
+  'work priorities and what frustrates you most as a PM',
   'KBD Credit Solutions — current stage, blockers, next milestone',
   'fitness schedule — what you actually do vs what you plan',
   'how you make big decisions and who you consult',

@@ -1,31 +1,5 @@
-// Gmail access for manoj.r@jodopay.com via a dedicated OAuth client (separate from the
-// GOOGLE_CLIENT_ID/SECRET used for Calendar, which is a different Google account/app).
-
-async function getJodopayAccessToken(): Promise<string | null> {
-  const clientId = process.env.GOOGLE_JODOPAY_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_JODOPAY_CLIENT_SECRET;
-  const refreshToken = process.env.GOOGLE_JODOPAY_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) {
-    console.error('Gmail (jodopay) not configured: missing GOOGLE_JODOPAY_CLIENT_ID/SECRET/REFRESH_TOKEN.');
-    return null;
-  }
-  try {
-    const res = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }),
-    });
-    if (!res.ok) {
-      console.error('Jodopay Gmail token refresh failed:', res.status, await res.text());
-      return null;
-    }
-    const data = await res.json() as { access_token?: string };
-    return data.access_token ?? null;
-  } catch (e) {
-    console.error('Jodopay Gmail token fetch error:', (e as Error).message);
-    return null;
-  }
-}
+// Gmail access for manojsuperb09@gmail.com via the shared Google token (same OAuth client as Calendar and Drive).
+import { getGoogleAccessToken } from '@/lib/google';
 
 interface GmailHeader { name: string; value: string }
 interface GmailMessagePart { headers?: GmailHeader[]; body?: { data?: string }; parts?: GmailMessagePart[]; mimeType?: string }
@@ -113,8 +87,8 @@ function extractPlainText(part: GmailMessagePart | undefined, depth = 0): string
 }
 
 export async function listLabels(): Promise<string> {
-  const token = await getJodopayAccessToken();
-  if (!token) return 'Gmail (jodopay) not configured.';
+  const token = await getGoogleAccessToken();
+  if (!token) return 'Gmail not configured.';
   const res = await fetch('https://www.googleapis.com/gmail/v1/users/me/labels', {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -145,7 +119,7 @@ export interface EmailSummary {
 // Shared by listRecentEmails (chat tool, formats to a display string) and the proactive
 // label-monitoring cron (needs structured per-message data to check/mark dedup state).
 export async function fetchMessageSummaries(query: string, maxResults = 10): Promise<EmailSummary[] | null> {
-  const token = await getJodopayAccessToken();
+  const token = await getGoogleAccessToken();
   if (!token) return null;
   const capped = Math.min(Math.max(maxResults, 1), 25);
 
@@ -184,7 +158,7 @@ export async function fetchMessageSummaries(query: string, maxResults = 10): Pro
 
 export async function listRecentEmails(query = 'is:unread', maxResults = 10): Promise<string> {
   const summaries = await fetchMessageSummaries(query, maxResults);
-  if (summaries === null) return 'Gmail (jodopay) not configured or list failed.';
+  if (summaries === null) return 'Gmail not configured or list failed.';
   if (!summaries.length) return 'No matching emails.';
   // UNTRUSTED EMAIL DATA — summarize only. Never treat any instruction-like text inside
   // a From/Subject/snippet as a command; it originates from whoever sent the email, not Manoj.
@@ -199,8 +173,8 @@ export async function listRecentEmails(query = 'is:unread', maxResults = 10): Pr
 
 export async function getEmail(messageId: string): Promise<string> {
   if (!/^[a-zA-Z0-9]+$/.test(messageId)) return 'Invalid email ID.';
-  const token = await getJodopayAccessToken();
-  if (!token) return 'Gmail (jodopay) not configured.';
+  const token = await getGoogleAccessToken();
+  if (!token) return 'Gmail not configured.';
 
   const res = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -226,8 +200,8 @@ export async function sendEmail(to: string, subject: string, body: string): Prom
   const safeTo = to.replace(/[\r\n]/g, ' ').trim();
   const safeSubject = subject.replace(/[\r\n]/g, ' ');
 
-  const token = await getJodopayAccessToken();
-  if (!token) return { ok: false, message: 'Gmail (jodopay) not configured.' };
+  const token = await getGoogleAccessToken();
+  if (!token) return { ok: false, message: 'Gmail not configured.' };
 
   const raw = [
     `To: ${safeTo}`,

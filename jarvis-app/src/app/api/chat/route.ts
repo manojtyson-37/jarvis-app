@@ -15,6 +15,7 @@ import { getTicket, updateTicketStatus, addTicketNote, getLatestTicketInGroups, 
 import { getQueryResults, listQueries } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
 import { listRecentEmails, getEmail, listLabels } from '@/lib/gmail';
+import { searchDrive, readDriveFile } from '@/lib/drive';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { getGoogleAccessToken } from '@/lib/google';
 
@@ -321,7 +322,7 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'list_emails',
-      description: "List recent emails from Manoj's jodopay Gmail inbox, optionally filtered by a Gmail search query.",
+      description: "List recent emails from Manoj's Gmail inbox, optionally filtered by a Gmail search query.",
       parameters: {
         type: 'object',
         properties: {
@@ -347,7 +348,7 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'send_email',
-      description: "Send an email from Manoj's jodopay Gmail account.",
+      description: "Send an email from Manoj's Gmail account.",
       parameters: {
         type: 'object',
         properties: {
@@ -363,8 +364,35 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'list_labels',
-      description: "List Manoj's custom Gmail labels (folders/tags he uses to organize his jodopay inbox).",
+      description: "List Manoj's custom Gmail labels (folders/tags he uses to organize his inbox).",
       parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_drive',
+      description: "Search Manoj's Google Drive by file name or content. Read-only. Returns name, type, modified date and file ID.",
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Plain text to search for in file names and contents' },
+          max_results: { type: 'number', description: 'Max files to return (default 10)' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_drive_file',
+      description: 'Read the text of one Drive file (Google Docs, Slides, text/CSV/JSON files; a Google Sheet returns only its first sheet) by its file ID from search_drive results. Cannot read PDFs or images. Read-only.',
+      parameters: {
+        type: 'object',
+        properties: { file_id: { type: 'string', description: 'The Drive file ID' } },
+        required: ['file_id'],
+      },
     },
   },
 ];
@@ -574,6 +602,12 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
     case 'list_labels':
       return listLabels();
 
+    case 'search_drive':
+      return searchDrive(String(args.query ?? ''), Number(args.max_results) || 10);
+
+    case 'read_drive_file':
+      return readDriveFile(String(args.file_id ?? ''));
+
     default:
       return `Unknown tool: ${name}`;
   }
@@ -607,7 +641,7 @@ const SKIP_NARRATION_TOOLS = new Set([
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
   'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note', 'send_email', 'create_calendar_event',
   'get_freshdesk_ticket', 'get_latest_ticket', 'get_agent_ticket_count', 'list_emails', 'get_email', 'list_labels',
-  'run_redash_query', 'list_redash_queries',
+  'run_redash_query', 'list_redash_queries', 'search_drive', 'read_drive_file',
 ]);
 
 export async function POST(req: NextRequest) {
