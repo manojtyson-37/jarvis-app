@@ -2,8 +2,9 @@
 // calling the tool, and they can be stale (e.g. from a previous account). Hide them in the model's
 // context only; the stored history and what the user sees are unchanged.
 const ROW = /^\[(?:automated|needs[- ]?look)\]\s+\[[A-Za-z0-9]+\]|^\[[A-Za-z0-9]{10,}\]\s+From:/i;
-// Phrased as data, not as something an assistant would say, so the model cannot echo it back as a reply.
-const STUB = '(older email list omitted)';
+// Placeholder text from earlier builds that was stored as assistant replies: the model copies such text back
+// as its own answer, so rows made only of it are dropped from the model's context.
+const POISON = /^\s*(?:\(older email list omitted\)|\[An earlier email list is not shown here[^\]]*\])\s*$/i;
 
 export function hasEmailList(content: string): boolean {
   return content.split('\n').some(l => ROW.test(l));
@@ -17,22 +18,22 @@ export function historyForModel(history: { role: 'user' | 'assistant'; content: 
   history.forEach((h, i) => { if (h.role === 'assistant' && hasEmailList(h.content)) lastList = i; });
   // Long replies are cut for the model's context: they cost tokens against the per-minute limit and add little.
   const trim = (t: string) => (t.length > 700 ? `${t.slice(0, 700)}…` : t);
-  return history.map((h, i) => ({ role: h.role, content: i === lastList ? h.content : h.role === 'assistant' ? trim(forModel(h.role, h.content)) : h.content }));
+  return history
+    .map((h, i) => ({ role: h.role, content: i === lastList ? h.content : h.role === 'assistant' ? trim(forModel(h.role, h.content)) : h.content }))
+    .filter(h => h.role === 'user' || (h.content.trim() !== '' && !POISON.test(h.content)));
 }
 
 export function forModel(role: 'user' | 'assistant', content: string): string {
   if (role !== 'assistant' || !hasEmailList(content)) return content;
   const lines = content.split('\n');
   const out: string[] = [];
-  let stubbed = false;
   for (let i = 0; i < lines.length; i++) {
     if (!ROW.test(lines[i])) { out.push(lines[i]); continue; }
-    if (!stubbed) { out.push(STUB); stubbed = true; }
     // Drop the row's snippet line too (indented in the current format, unindented in older ones).
     const next = lines[i + 1] ?? '';
     if (next.trim() && !ROW.test(next) && !next.trim().startsWith('[')) i++;
   }
-  return out.join('\n');
+  return out.join('\n').trim();
 }
 
 // "gmail" alone forces the read-only inbox lookup, unless the message is clearly an action or another tool's job.

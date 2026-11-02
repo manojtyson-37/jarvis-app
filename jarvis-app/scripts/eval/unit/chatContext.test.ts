@@ -2,9 +2,9 @@ import { forModel, gmailLookupIntent, historyForModel } from '../../../src/lib/c
 let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
 const list = '[automated] [1a10115c7a74c864] Quick Report (4 Oct) — "Flex"\n  Flex Setup snippet\n[needs-look] [1a104f709ed3f546] Bob — "Hi"\n  hello there';
 const r = forModel('assistant', list);
-ok('pure list -> only stub', r === '(older email list omitted)');
+ok('pure list -> empty, no stub text', r === '');
 const mixed = forModel('assistant', 'Here are your emails.\n[needs-look] [abc123] Bob — "Hi"\n  hello\nBob wants lunch; I suggest replying yes.');
-ok('mixed keeps analysis, drops rows', mixed.includes('Bob wants lunch') && mixed.includes('Here are your emails.') && !mixed.includes('abc123') && mixed.includes('(older email list omitted)'));
+ok('mixed keeps analysis, drops rows', mixed.includes('Bob wants lunch') && mixed.includes('Here are your emails.') && !mixed.includes('abc123') && !mixed.includes('omitted'));
 const mangled = forModel('assistant', '[needs look] [1a0f837787b0bd3f] Not verified\nNot verified by Google Yet to know\n[need');
 ok('mangled row + snippet removed', !mangled.includes('Not verified') && mangled.includes('[need'));
 ok('legacy removed', !forModel('assistant', '[1a10115c7a74c864] From: Google no-reply@accounts.google.com — "Security alert"\nA new sign-in').includes('Security alert'));
@@ -21,6 +21,12 @@ const h = historyForModel([
   { role: 'user', content: 'again' }, { role: 'assistant', content: '[needs-look] [zzz999] New — "Fresh"\n  s' },
   { role: 'user', content: 'summarise' },
 ]);
-ok('older list stubbed, latest kept', h[1].content === '(older email list omitted)' && h[3].content.includes('Fresh'));
+ok('older list dropped, latest kept', h.length === 4 && h.every(x => !x.content.includes('Quick Report')) && h[2].content.includes('Fresh'));
+const poisoned = historyForModel([
+  { role: 'user', content: 'jobs?' }, { role: 'assistant', content: '(older email list omitted)' },
+  { role: 'user', content: 'x' }, { role: 'assistant', content: '[An earlier email list is not shown here: it may be out of date. Call list_emails.]' },
+  { role: 'user', content: 'ok' }, { role: 'assistant', content: 'Fine.' },
+]);
+ok('poisoned assistant rows dropped', poisoned.length === 4 && poisoned.every(x => !/omitted|not shown here/.test(x.content)) && poisoned[3].content === 'Fine.');
 ok('only list kept intact', historyForModel([{ role: 'assistant', content: list }])[0].content === list);
 process.exit(f ? 1 : 0);

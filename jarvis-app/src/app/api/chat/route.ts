@@ -32,19 +32,24 @@ const PRIMARY_MODEL = 'qwen/qwen3.8-27b';
 const FALLBACK_MODEL = 'openai/gpt-oss-120b';
 const MAX_WAIT_MS = 12000;
 
+// Groq words the wait as e.g. "7m12.5s", "3.2s" or "250ms".
 function retryWaitMs(e: unknown): number | null {
-  const m = /try again in (?:(\d+)m)?(?:([\d.]+)s)?/i.exec((e as Error).message ?? '');
+  const m = /try again in (?:(\d+)m(?!s))?(?:([\d.]+)(ms|s))?/i.exec((e as Error).message ?? '');
   if (!m || (!m[1] && !m[2])) return null;
-  return ((Number(m[1] ?? 0) * 60) + Number(m[2] ?? 0)) * 1000;
+  const secs = m[2] ? (m[3].toLowerCase() === 'ms' ? Number(m[2]) / 1000 : Number(m[2])) : 0;
+  return (Number(m[1] ?? 0) * 60 + secs) * 1000;
 }
 
-async function withFallback<T>(call: (model: string) => Promise<T>): Promise<T> {
+// Waits stack across the several model calls of one turn, so a turn that has already run long skips the wait.
+const WAIT_BUDGET_MS = 25000;
+
+async function withFallback<T>(call: (model: string) => Promise<T>, startedAt: number): Promise<T> {
   try {
     return await call(PRIMARY_MODEL);
   } catch (e) {
     if ((e as { status?: number }).status !== 429) throw e;
     const wait = retryWaitMs(e);
-    if (wait !== null && wait <= MAX_WAIT_MS) {
+    if (wait !== null && wait <= MAX_WAIT_MS && Date.now() - startedAt < WAIT_BUDGET_MS) {
       await new Promise(r => setTimeout(r, wait + 250));
       try { return await call(PRIMARY_MODEL); } catch (e2) { if ((e2 as { status?: number }).status !== 429) throw e2; }
     }
@@ -684,6 +689,8 @@ const SKIP_NARRATION_TOOLS = new Set([
 const ACTIONISH = /\b(send|add|remind|log|save|delete|cancel|set|create|schedule|book|mark|find|search|read|summari[sz]e|move|reschedule|forward|open|list)\b/i;
 
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
+  const wf = <T,>(call: (model: string) => Promise<T>) => withFallback(call, startedAt);
   const { message } = await req.json();
   // Test isolation: outside production only, an eval run can act as its own throwaway user so it never
   // touches Manoj's real notes, reminders or chat history. Deployed builds always run with NODE_ENV=production.
@@ -881,7 +888,7 @@ export async function POST(req: NextRequest) {
 
         let response: Groq.Chat.ChatCompletion;
         try {
-          response = await withFallback(model => groq.chat.completions.create({
+          response = await wf(model => groq.chat.completions.create({
             ...fallbackOpts(model),
             model,
             messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
@@ -901,7 +908,7 @@ export async function POST(req: NextRequest) {
         // while it only had a subset of tools. Retry once with the full set before accepting a tool-less answer.
         if (response.choices[0]?.finish_reason !== 'tool_calls' && turnTools.length < TOOLS.length && ACTIONISH.test(message)) {
           try {
-            response = await withFallback(model => groq.chat.completions.create({
+            response = await wf(model => groq.chat.completions.create({
               ...fallbackOpts(model),
               model,
               messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
@@ -965,7 +972,7 @@ export async function POST(req: NextRequest) {
                 const files = await Promise.all(driveReadableIds(listed).map(id => readDriveFile(id).catch(() => '')));
                 data += files.filter(Boolean).map(f => `\n\n--- file text ---\n${f.slice(0, 1500)}`).join('');
               }
-              const g = await withFallback(model => groq.chat.completions.create({
+              const g = await wf(model => groq.chat.completions.create({
                 ...fallbackOpts(model),
                 model,
                 messages: [{ role: 'system', content: GROUNDED_SYSTEM }, { role: 'user', content: groundedUser(message, data) }],
@@ -1002,7 +1009,7 @@ export async function POST(req: NextRequest) {
           // tool_choice:'none' errors on qwen — keep 'auto' and only collect content deltas;
           // if model returns tool_calls (rare), chunksEmitted stays 0 and finish() emits fallback.
           try {
-            const groqStream = await withFallback(model => groq.chat.completions.create({
+            const groqStream = await wf(model => groq.chat.completions.create({
               ...fallbackOpts(model),
               model,
               messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
