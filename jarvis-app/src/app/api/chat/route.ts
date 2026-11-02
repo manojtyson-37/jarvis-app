@@ -16,7 +16,7 @@ import { getQueryResults, listQueries } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
 import { listRecentEmails, getEmail, listLabels } from '@/lib/gmail';
 import { searchDrive, readDriveFile } from '@/lib/drive';
-import { historyForModel, gmailLookupIntent } from '@/lib/chatContext';
+import { historyForModel, gmailLookupIntent, isPlaceholderReply } from '@/lib/chatContext';
 import { selectTools } from '@/lib/toolRouting';
 import { analysisIntent, GROUNDABLE, GROUNDED_SYSTEM, groundedUser, needsLookIds, driveReadableIds } from '@/lib/grounded';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
@@ -657,7 +657,8 @@ export const maxDuration = 60;
 
 export async function GET() {
   const history = await getConversationHistory('manoj', 40);
-  return NextResponse.json({ history });
+  // Placeholder replies from earlier builds are junk, not answers; hide them from the chat view (rows stay stored).
+  return NextResponse.json({ history: history.filter(h => !isPlaceholderReply(h.role, h.content)) });
 }
 
 // Tools whose result skips the 2nd (narration) Groq call and gets returned raw instead.

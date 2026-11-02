@@ -6,6 +6,8 @@ const ROW = /^\[(?:automated|needs[- ]?look)\]\s+\[[A-Za-z0-9]+\]|^\[[A-Za-z0-9]
 // as its own answer, so rows made only of it are dropped from the model's context.
 const POISON = /^\s*(?:\(older email list omitted\)|\[An earlier email list is not shown here[^\]]*\])\s*$/i;
 
+export const isPlaceholderReply = (role: string, content: string) => role === 'assistant' && POISON.test(content);
+
 export function hasEmailList(content: string): boolean {
   return content.split('\n').some(l => ROW.test(l));
 }
@@ -20,7 +22,7 @@ export function historyForModel(history: { role: 'user' | 'assistant'; content: 
   const trim = (t: string) => (t.length > 700 ? `${t.slice(0, 700)}…` : t);
   return history
     .map((h, i) => ({ role: h.role, content: i === lastList ? h.content : h.role === 'assistant' ? trim(forModel(h.role, h.content)) : h.content }))
-    .filter(h => h.role === 'user' || (h.content.trim() !== '' && !POISON.test(h.content)));
+    .filter(h => h.role === 'user' || (h.content.trim() !== '' && !isPlaceholderReply(h.role, h.content)));
 }
 
 export function forModel(role: 'user' | 'assistant', content: string): string {
