@@ -44,29 +44,30 @@ export function gmailLookupIntent(message: string): boolean {
 }
 
 // A read-only calendar question must hit the tool: left on 'auto' the model skipped it on production and invented events.
-// Needs a calendar noun AND a read cue, and no write verb, so "put lunch on my calendar" or "clear my schedule" is never
-// forced into the read tool. Mixed read+write messages stay on 'auto'.
-const CAL_NOUN = /\b(calendar|agenda|schedule|meetings?|events?|appointments?|my day)\b/i;
-const CAL_READ = /\b(what|which|show|list|check|any|do i have|when|how)\b/i;
-const CAL_MY = /\b(my|am i)\b/i;
+// Allowlist of whole-message read templates, not a verb deny-list: three review rounds found a new write phrasing
+// ("list my meetings as done", "any chance my meeting can be 4pm") every time a deny-list was extended. Anything that
+// is not exactly one of these shapes stays on 'auto', so a write can never be forced into the read tool.
 const DAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday';
-const CAL_TIME = new RegExp(`\\b(today|tomorrow|tonight|this (?:week|morning|afternoon|evening|weekend)|next (?:week|meeting|event)|upcoming|${DAYS})\\b|\\b\\d{1,2}(?::\\d\\d)? ?(?:am|pm)\\b`, 'i');
-// Fixed phrasings only: loose cues like tell/give/read captured write requests ("give my 3pm meeting a new title").
-const CAL_ONLY = new RegExp(
-  `\\bwhat(?:'s|s| is)? (?:on|up|happening|going on)\\b.{0,25}\\b(?:today|tomorrow|tonight|this week|next week)\\W*$` +
-  `|\\bwhat do i have (?:on|planned|scheduled|coming up|lined up|today|tomorrow|tonight|this week|next week)\\b` +
-  `|\\bdo i have (?:time|anything|something|plans)\\b.{0,12}\\b(?:today|tomorrow|tonight|this week|next week|${DAYS})\\b` +
-  `|\\b(?:tell|read|give|walk) me (?:about )?(?:my |the )?(?:agenda|schedule|day|calendar)\\b`, 'i');
-// Inflected stems (moved, scheduling, titled…); "schedule" alone stays a noun ("show my schedule").
-const CAL_WRITE = /\b(?:add|creat|book|set|delet|remov|cancel|mov|reschedul|postpon|invit|remind|put|block|chang|updat|edit|renam|extend|shorten|shift|clear|sav|sync|pencil|fix|titl|nam|mark|push|drop|skip|declin|accept|swap|replac|mak|rebook|reserv|insert|attach|assign|reassign|ditch|wipe|kill|trim|cut|erase|purg|overwrit|log|enter|slot|throw|prepar)(?:e|s|es|ed|d|ing|ting|ping|king|ning)?\b|\bset up\b|\bfree up\b|\brepl(?:y|ies|ied)\b|\bschedul(?:ing|ed)\b|\bschedule (?:a|an|the|me|it|my|standup|lunch|call)\b/i;
-const CAL_OTHER = /\b(notes?|minutes|transcript|action items?|fireflies|summar\w*|e-?mails?|mail|tickets?|drive|docs?|redash)\b/i;
-// A plain read is one short question. A second clause, a request word, or an implicit "make it X" cue means a write may
-// be hiding in it, so it stays on 'auto'. This guard is the primary defence; CAL_WRITE is a backup.
-const CAL_COMPOUND = /[.?!;,:]\s*\S|\b(and|then|also|please|now|but|instead|how about|what if|should be|to be|can you|could you|would you)\b/i;
+const D = `(?:today|tomorrow|tonight|this week|next week|this weekend|(?:on )?(?:${DAYS}))`;
+const TM = '\\d{1,2}(?::\\d\\d)? ?(?:am|pm)';
+const MY = '(?:my |the )?';
+const EVT = '(?:meetings?|events?|appointments?)';
+const FOR_D = `(?:\\s+(?:on |for )?${D})?`;
+const CAL_READ_TEMPLATES = [
+  `(?:what(?:'s| is)?|show|list|check|read)\\s+(?:on\\s+)?${MY}(?:calendar|schedule|agenda)${FOR_D}`,
+  `(?:what|which)\\s+${EVT}\\s+do i have${FOR_D}`,
+  `(?:do i have|any)\\s+(?:any\\s+)?${EVT}${FOR_D}`,
+  `(?:show|list)(?: me)?\\s+${MY}${EVT}${FOR_D}`,
+  `when(?:'s| is)? my next (?:meeting|event|appointment)`,
+  `am i (?:free|busy)(?:\\s+(?:${D}|at ${TM}))*`,
+  `what(?:'s| is)? (?:on|up|happening|going on)\\s+${D}`,
+  `what do i have(?:\\s+(?:on|planned|scheduled|coming up|lined up))?\\s+${D}`,
+  `(?:what(?:'s| is)? my day(?: look(?:s|ing)?(?: like)?)?|how(?: does|'s| is) my day(?: look(?:s|ing)?(?: like)?)?)${FOR_D}`,
+  `(?:tell|read|give|walk) me (?:about )?${MY}(?:agenda|schedule|day|calendar)${FOR_D}`,
+  `do i have (?:time|anything|something|plans)\\s+${D}`,
+].map((t) => `(?:${t})`).join('|');
+const CAL_READ_RE = new RegExp(`^(?:${CAL_READ_TEMPLATES})$`, 'i');
 export function calendarReadIntent(message: string): boolean {
-  if (CAL_COMPOUND.test(message.trim())) return false;
-  if (CAL_WRITE.test(message) || CAL_OTHER.test(message)) return false;
-  if (CAL_ONLY.test(message)) return true;
-  if (/\bam i (?:free|busy)\b/i.test(message)) return CAL_TIME.test(message);
-  return CAL_NOUN.test(message) && CAL_READ.test(message) && (CAL_MY.test(message) || CAL_TIME.test(message));
+  const m = message.replace(/[‘’]/g, "'").trim().replace(/[?!.\s]+$/, '').replace(/\s+/g, ' ');
+  return CAL_READ_RE.test(m);
 }
