@@ -42,3 +42,16 @@ export function forModel(role: 'user' | 'assistant', content: string): string {
 export function gmailLookupIntent(message: string): boolean {
   return /\bgmail\b/i.test(message) && !/\b(send|draft|compose|reply|forward|write|connect|redash)\b/i.test(message);
 }
+
+// A read-only calendar question must hit the tool: left on 'auto' the model skipped it on production and invented events.
+// Needs a calendar noun AND a read cue, and no write verb, so "put lunch on my calendar" or "clear my schedule" is never
+// forced into the read tool. Mixed read+write messages stay on 'auto'.
+const CAL_NOUN = /\b(calendar|agenda|schedule|meetings?|events?|appointments?|my day)\b/i;
+const CAL_READ = /\b(what|which|show|list|check|any|do i have|when|how)\b/i;
+const CAL_ONLY = /\bwhat(?:'s|s| is)? on\b.{0,25}\b(today|tomorrow|tonight|this week|next week)\b|\bwhat do i have\b|\bam i (?:free|busy)\b/i;
+const CAL_WRITE = /\b(add|adding|create|book|booking|set up|delete|remove|cancel|move|reschedule|postpone|invite|remind|put|block|change|update|edit|rename|extend|shorten|shift|clear|free up|save|sync|pencil|make|fix|schedule (?:a|an|the|me|it|my|standup|lunch|call))\b/i;
+const CAL_OTHER = /\b(notes?|minutes|transcript|action items?|fireflies|summar\w*|e-?mails?|mail|tickets?|drive|docs?|redash)\b/i;
+export function calendarReadIntent(message: string): boolean {
+  if (CAL_WRITE.test(message) || CAL_OTHER.test(message)) return false;
+  return CAL_ONLY.test(message) || (CAL_NOUN.test(message) && CAL_READ.test(message));
+}

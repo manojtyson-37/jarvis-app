@@ -16,7 +16,7 @@ import { getQueryResults, listQueries } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
 import { listRecentEmails, getEmail, listLabels } from '@/lib/gmail';
 import { searchDrive, readDriveFile } from '@/lib/drive';
-import { historyForModel, gmailLookupIntent, isPlaceholderReply } from '@/lib/chatContext';
+import { historyForModel, gmailLookupIntent, isPlaceholderReply, calendarReadIntent } from '@/lib/chatContext';
 import { selectTools } from '@/lib/toolRouting';
 import { analysisIntent, GROUNDABLE, GROUNDED_SYSTEM, groundedUser, needsLookIds, driveReadableIds } from '@/lib/grounded';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
@@ -49,7 +49,7 @@ async function withFallback<T>(call: (model: string) => Promise<T>, startedAt: n
   } catch (e) {
     // The primary model sometimes returns nothing under a forced tool choice ("tool_use_failed"); the other model copes.
     if ((e as { status?: number }).status === 400 && /tool_use_failed/.test((e as Error).message ?? '')) {
-      console.warn('primary model failed to call the forced tool, using fallback model');
+      console.warn('primary model failed to call the forced tool, using fallback model:', (e as Error).message?.slice(0, 200));
       return call(FALLBACK_MODEL);
     }
     if ((e as { status?: number }).status !== 429) throw e;
@@ -807,10 +807,6 @@ export async function POST(req: NextRequest) {
     && !/\b(draft|compose|write|unread|inbox)\b|\bsend me\b|\b(don'?t|do not|never|not)\b/i.test(message);
   const inboxCheckMatch = !emailIdMatch && !labelMatch
     && (/\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message) || gmailLookupIntent(message));
-  // A read-only calendar question must hit the tool: left on 'auto' the model skipped it on production and invented events.
-  const calendarMatch = !emailIdMatch && !labelMatch && !sendMailMatch && !inboxCheckMatch
-    && (/\b(calendar|agenda)\b|\bwhat'?s\b.{0,15}\b(on|happening|up)\b.{0,25}\b(today|tomorrow|tonight|this week|next week)\b|\bmy (?:meetings|schedule)\b|\bany (?:meetings|events)\b/i.test(message))
-    && !/\b(add|create|book|set up|delete|remove|cancel|move|reschedule|postpone|invite|remind|schedule (?:a|an|the)\b)/i.test(message);
   // "redash" is distinctive enough on its own (unlike "ticket") that it doesn't need the
   // AND-of-two-signals treatment the email/ticket regexes above do — no unrelated casual
   // message plausibly contains it. A nearby number means a specific known query ID
@@ -856,12 +852,12 @@ export async function POST(req: NextRequest) {
           ? { type: 'function' as const, function: { name: 'send_email' } }
           : inboxCheckMatch
           ? { type: 'function' as const, function: { name: 'list_emails' } }
-          : calendarMatch
-          ? { type: 'function' as const, function: { name: 'get_calendar_events' } }
           : redashIdMatch
             ? { type: 'function' as const, function: { name: 'run_redash_query' } }
             : redashMentioned
               ? { type: 'function' as const, function: { name: 'list_redash_queries' } }
+              : calendarReadIntent(message)
+              ? { type: 'function' as const, function: { name: 'get_calendar_events' } }
               : awaitingAgentDisambiguation
                 ? { type: 'function' as const, function: { name: 'get_agent_ticket_count' } }
                 : 'auto' as const;
