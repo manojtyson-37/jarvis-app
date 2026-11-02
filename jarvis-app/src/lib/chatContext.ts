@@ -68,6 +68,7 @@ const CAL_READ_TEMPLATES = [
 ].map((t) => `(?:${t})`).join('|');
 const CAL_READ_RE = new RegExp(`^(?:${CAL_READ_TEMPLATES})$`, 'i');
 export function calendarReadIntent(message: string): boolean {
+  if (message.length > 200) return false; // no real read is this long; also bounds the normalisation below
   const m = message.replace(/[‘’]/g, "'").trim().replace(/[?!.\s]+$/, '').replace(/\s+/g, ' ');
   return CAL_READ_RE.test(m);
 }
