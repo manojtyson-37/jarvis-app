@@ -2,10 +2,26 @@
 // calling the tool, and they can be stale (e.g. from a previous account). Hide them in the model's
 // context only; the stored history and what the user sees are unchanged.
 const ROW = /^\[(?:automated|needs[- ]?look)\]\s+\[[A-Za-z0-9]+\]|^\[[A-Za-z0-9]{10,}\]\s+From:/i;
-const STUB = '[An earlier email list is not shown here: it may be out of date. Call list_emails for current mail, and re-list before acting on "the second one" or "that email". Never recreate a list from memory.]';
+// Phrased as data, not as something an assistant would say, so the model cannot echo it back as a reply.
+const STUB = '(older email list omitted)';
+
+export function hasEmailList(content: string): boolean {
+  return content.split('\n').some(l => ROW.test(l));
+}
+
+// Model context for the chat history: the MOST RECENT email list stays intact (follow-ups like "summarise
+// these" or "reply to the second one" need it); older lists are hidden because they are stale and invite
+// the model to copy their format instead of fetching fresh mail.
+export function historyForModel(history: { role: 'user' | 'assistant'; content: string }[]): { role: 'user' | 'assistant'; content: string }[] {
+  let lastList = -1;
+  history.forEach((h, i) => { if (h.role === 'assistant' && hasEmailList(h.content)) lastList = i; });
+  // Long replies are cut for the model's context: they cost tokens against the per-minute limit and add little.
+  const trim = (t: string) => (t.length > 700 ? `${t.slice(0, 700)}…` : t);
+  return history.map((h, i) => ({ role: h.role, content: i === lastList ? h.content : h.role === 'assistant' ? trim(forModel(h.role, h.content)) : h.content }));
+}
 
 export function forModel(role: 'user' | 'assistant', content: string): string {
-  if (role !== 'assistant' || !content.split('\n').some(l => ROW.test(l))) return content;
+  if (role !== 'assistant' || !hasEmailList(content)) return content;
   const lines = content.split('\n');
   const out: string[] = [];
   let stubbed = false;

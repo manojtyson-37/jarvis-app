@@ -16,11 +16,44 @@ import { getQueryResults, listQueries } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
 import { listRecentEmails, getEmail, listLabels } from '@/lib/gmail';
 import { searchDrive, readDriveFile } from '@/lib/drive';
-import { forModel, gmailLookupIntent } from '@/lib/chatContext';
+import { historyForModel, gmailLookupIntent } from '@/lib/chatContext';
+import { selectTools } from '@/lib/toolRouting';
+import { analysisIntent, GROUNDABLE, GROUNDED_SYSTEM, groundedUser, needsLookIds, driveReadableIds } from '@/lib/grounded';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { getGoogleAccessToken } from '@/lib/google';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// Retries are handled here, not in the SDK: a daily-quota 429 carries a wait of many minutes, so the SDK would burn
+// seconds of backoff before we ever reached the fallback.
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY, maxRetries: 0 });
+
+// Free-tier Groq caps each model at 200k tokens/day (and 8k/minute). A short per-minute limit is waited out once;
+// a daily limit goes straight to a second model with its own quota so Maya keeps answering.
+const PRIMARY_MODEL = 'qwen/qwen3.8-27b';
+const FALLBACK_MODEL = 'openai/gpt-oss-120b';
+const MAX_WAIT_MS = 12000;
+
+function retryWaitMs(e: unknown): number | null {
+  const m = /try again in (?:(\d+)m)?(?:([\d.]+)s)?/i.exec((e as Error).message ?? '');
+  if (!m || (!m[1] && !m[2])) return null;
+  return ((Number(m[1] ?? 0) * 60) + Number(m[2] ?? 0)) * 1000;
+}
+
+async function withFallback<T>(call: (model: string) => Promise<T>): Promise<T> {
+  try {
+    return await call(PRIMARY_MODEL);
+  } catch (e) {
+    if ((e as { status?: number }).status !== 429) throw e;
+    const wait = retryWaitMs(e);
+    if (wait !== null && wait <= MAX_WAIT_MS) {
+      await new Promise(r => setTimeout(r, wait + 250));
+      try { return await call(PRIMARY_MODEL); } catch (e2) { if ((e2 as { status?: number }).status !== 429) throw e2; }
+    }
+    console.warn('primary model rate limited, using fallback model');
+    return call(FALLBACK_MODEL);
+  }
+}
+// The fallback is a reasoning model: keep its thinking short so the answer fits the token budget.
+const fallbackOpts = (model: string) => (model === PRIMARY_MODEL ? {} : { reasoning_effort: 'low' as const });
 
 const TOOLS: Groq.Chat.ChatCompletionTool[] = [
   {
@@ -614,6 +647,9 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
   }
 }
 
+// Vercel's default would otherwise cut a long tool-plus-summary turn off with no message.
+export const maxDuration = 60;
+
 export async function GET() {
   const history = await getConversationHistory('manoj', 40);
   return NextResponse.json({ history });
@@ -645,9 +681,15 @@ const SKIP_NARRATION_TOOLS = new Set([
   'run_redash_query', 'list_redash_queries', 'search_drive', 'read_drive_file',
 ]);
 
+const ACTIONISH = /\b(send|add|remind|log|save|delete|cancel|set|create|schedule|book|mark|find|search|read|summari[sz]e|move|reschedule|forward|open|list)\b/i;
+
 export async function POST(req: NextRequest) {
   const { message } = await req.json();
-  const userId = 'manoj';
+  // Test isolation: outside production only, an eval run can act as its own throwaway user so it never
+  // touches Manoj's real notes, reminders or chat history. Deployed builds always run with NODE_ENV=production.
+  const evalHeader = process.env.NODE_ENV !== 'production' ? req.headers.get('x-maya-eval-user') : null;
+  const evalUser = evalHeader && /^cso-eval-[a-z0-9-]{1,48}$/.test(evalHeader) ? evalHeader : null;
+  const userId = evalUser ?? 'manoj';
 
   if (!message?.trim()) return NextResponse.json({ error: 'Empty message' }, { status: 400 });
 
@@ -738,12 +780,18 @@ export async function POST(req: NextRequest) {
   // A Gmail message ID is a long hex string — check for one BEFORE the general inbox-check
   // match below, so "show me email <id>" routes to get_email rather than getting swept into
   // the broader "show...email" inbox-check pattern and incorrectly forced to list_emails.
-  const emailIdMatch = /\b[0-9a-f]{10,}\b/i.test(message);
+  const emailIdMatch = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{10,}\b/i.test(message);
   // Scoped to email/Gmail context, not bare "label" — otherwise "what label would you give
   // this idea" or "add a label to this note" would wrongly force a Gmail tool call too.
   const labelMatch = /\blabels?\b.{0,20}\b(email|gmail|inbox)\b|\b(email|gmail|inbox)\b.{0,20}\blabels?\b/i.test(message);
   // "gmail" (without send/draft/reply/redash intent) forces the read-only lookup: "I connected my gmail account" matched
   // nothing, so the model answered from stale chat history (old Jodo lists) instead of checking the inbox.
+  // An explicit "send an email to X" must reach send_email (which only QUEUES it for approval). Left on 'auto',
+  // the model sometimes skipped the tool and answered as if the email had been handled. "draft" is excluded on
+  // purpose: there is no draft tool, and a draft request must never queue a send.
+  const sendMailMatch = !emailIdMatch && !labelMatch
+    && (/\b(send|shoot|fire off)\s+(?:an?\s+|the\s+)?(?:e-?mail|mail)\b.{0,80}(?:\bto\b|@)/i.test(message) || /\b(?:e-?mail|mail)\s+[\w.+-]+@[\w-]+\.\w+/i.test(message))
+    && !/\b(draft|compose|write|unread|inbox)\b|\bsend me\b|\b(don'?t|do not|never|not)\b/i.test(message);
   const inboxCheckMatch = !emailIdMatch && !labelMatch
     && (/\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message) || gmailLookupIntent(message));
   // "redash" is distinctive enough on its own (unlike "ticket") that it doesn't need the
@@ -787,7 +835,9 @@ export async function POST(req: NextRequest) {
       ? { type: 'function' as const, function: { name: 'get_email' } }
       : labelMatch
         ? { type: 'function' as const, function: { name: 'list_labels' } }
-        : inboxCheckMatch
+        : sendMailMatch
+          ? { type: 'function' as const, function: { name: 'send_email' } }
+          : inboxCheckMatch
           ? { type: 'function' as const, function: { name: 'list_emails' } }
           : redashIdMatch
             ? { type: 'function' as const, function: { name: 'run_redash_query' } }
@@ -796,6 +846,11 @@ export async function POST(req: NextRequest) {
               : awaitingAgentDisambiguation
                 ? { type: 'function' as const, function: { name: 'get_agent_ticket_count' } }
                 : 'auto' as const;
+
+  // Only the tool definitions this message can need — see toolRouting.ts for why.
+  const forcedName = typeof forcedToolChoice === 'object' ? forcedToolChoice.function.name : undefined;
+  const recent = history.slice(-4).map(h => h.content.slice(0, 300));
+  const turnTools = selectTools(TOOLS, message, recent, forcedName);
 
   await appendConversation(userId, 'user', message);
 
@@ -820,23 +875,41 @@ export async function POST(req: NextRequest) {
       // Top-level net: any unhandled throw settles the controller so the stream is never leaked
       (async () => {
         const msgs: Groq.Chat.ChatCompletionMessageParam[] = [
-          ...history.map((h: { role: 'user' | 'assistant'; content: string }) => ({ role: h.role, content: forModel(h.role, h.content) })),
+          ...historyForModel(history),
           { role: 'user', content: message },
         ];
 
         let response: Groq.Chat.ChatCompletion;
         try {
-          response = await groq.chat.completions.create({
-            model: 'qwen/qwen3.8-27b',
+          response = await withFallback(model => groq.chat.completions.create({
+            ...fallbackOpts(model),
+            model,
             messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
-            tools: TOOLS,
+            tools: turnTools,
             tool_choice: forcedToolChoice,
-            max_tokens: 400,
-          });
+            max_tokens: model === PRIMARY_MODEL ? 400 : 700, // the fallback spends some tokens reasoning first
+          }));
         } catch (e) {
           console.error('Groq initial call failed:', (e as Error).message);
-          await finish('Hit a snag — try again in a moment.');
+          await finish((e as { status?: number }).status === 429
+            ? "I'm at my rate limit for the moment. Ask again in about a minute."
+            : 'Hit a snag — try again in a moment.');
           return;
+        }
+
+        // Last resort for a routing miss: the model answered an action-sounding message without calling any tool
+        // while it only had a subset of tools. Retry once with the full set before accepting a tool-less answer.
+        if (response.choices[0]?.finish_reason !== 'tool_calls' && turnTools.length < TOOLS.length && ACTIONISH.test(message)) {
+          try {
+            response = await withFallback(model => groq.chat.completions.create({
+              ...fallbackOpts(model),
+              model,
+              messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
+              tools: TOOLS,
+              tool_choice: 'auto',
+              max_tokens: model === PRIMARY_MODEL ? 400 : 700,
+            }));
+          } catch { /* keep the first answer */ }
         }
 
         let turns = 0;
@@ -852,14 +925,63 @@ export async function POST(req: NextRequest) {
 
           for (const tc of toolCalls) {
             let result: string;
+            // Progress event so the UI can show "Checking Gmail…". Unknown keys are ignored by older clients.
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ tool: tc.function.name, phase: 'start' })}\n\n`));
             try {
-              result = await executeTool(tc.function.name, JSON.parse(tc.function.arguments), userId);
+              const targs = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+              // The model sometimes truncates an id it was handed ("1a10115c…" became "1a"). An id the user
+              // typed is authoritative, so use it verbatim.
+              if (tc.function.name === 'get_email' && toolCalls.filter(t => t.function.name === 'get_email').length === 1) {
+                const typed = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{10,}\b/i.exec(message)?.[0];
+                if (typed && targs.message_id !== typed) targs.message_id = typed;
+              }
+              result = await executeTool(tc.function.name, targs, userId);
             } catch (e) {
               result = `Tool error: ${(e as Error).message}`;
             }
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              tool: tc.function.name, phase: 'end', ok: !result.startsWith('Tool error'),
+              // Arguments and a result excerpt are exposed to eval runs only.
+              ...(evalUser ? { args: tc.function.arguments, result: result.slice(0, 700) } : {}),
+            })}\n\n`));
             toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
             if (GATED_TOOLS.has(tc.function.name)) queuedNotes.push(result);
             if (SKIP_NARRATION_TOOLS.has(tc.function.name)) fastResults.push(result);
+          }
+
+          // "Summarise / read through / prioritise" over read-only tool data: answer from the data alone.
+          if (analysisIntent(message) && toolCalls.length > 0 && toolCalls.every(tc => GROUNDABLE.has(tc.function.name)) && !toolResults.some(t => String(t.content).startsWith('Tool error'))) {
+            try {
+              // Each section has its own cap so appended bodies / file text are never silently cut off.
+              const listed = toolResults.map(t => String(t.content)).join('\n\n');
+              let data = listed.slice(0, 2500);
+              // An email summary is thin on snippets alone: add the bodies of the few worth a look.
+              if (toolCalls.some(tc => tc.function.name === 'list_emails')) {
+                const bodies = await Promise.all(needsLookIds(listed).map(id => getEmail(id).catch(() => '')));
+                data += bodies.filter(Boolean).map(b => `\n\n--- email body ---\n${b.slice(0, 900)}`).join('');
+              }
+              // Likewise for Drive: a summary needs the file text, not just names.
+              if (toolCalls.some(tc => tc.function.name === 'search_drive')) {
+                const files = await Promise.all(driveReadableIds(listed).map(id => readDriveFile(id).catch(() => '')));
+                data += files.filter(Boolean).map(f => `\n\n--- file text ---\n${f.slice(0, 1500)}`).join('');
+              }
+              const g = await withFallback(model => groq.chat.completions.create({
+                ...fallbackOpts(model),
+                model,
+                messages: [{ role: 'system', content: GROUNDED_SYSTEM }, { role: 'user', content: groundedUser(message, data) }],
+                temperature: 0.2,
+                max_tokens: model === PRIMARY_MODEL ? 450 : 800,
+              }));
+              const summary = (g.choices[0]?.message?.content ?? '').trim();
+              if (summary) {
+                await appendConversation(userId, 'assistant', summary).catch(() => {});
+                emit(summary);
+                close();
+                return;
+              }
+            } catch (e) {
+              console.error('grounded summary failed, falling back to raw:', (e as Error).message);
+            }
           }
 
           // All fast-confirm — skip 2nd Groq call
@@ -880,14 +1002,15 @@ export async function POST(req: NextRequest) {
           // tool_choice:'none' errors on qwen — keep 'auto' and only collect content deltas;
           // if model returns tool_calls (rare), chunksEmitted stays 0 and finish() emits fallback.
           try {
-            const groqStream = await groq.chat.completions.create({
-              model: 'qwen/qwen3.8-27b',
+            const groqStream = await withFallback(model => groq.chat.completions.create({
+              ...fallbackOpts(model),
+              model,
               messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
-              tools: TOOLS,
+              tools: turnTools,
               tool_choice: 'auto',
-              max_tokens: 600,
+              max_tokens: model === PRIMARY_MODEL ? 600 : 900,
               stream: true,
-            });
+            }));
 
             let fullReply = '';
             let chunksEmitted = 0;

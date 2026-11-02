@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import RichMessage from '@/components/RichMessage';
+import { TOOL_LABELS } from '@/lib/toolLabels';
 import { ChatIcon, NoteIcon, BellIcon, ActivityIcon, MicIcon, SendIcon, XIcon, CheckIcon, LogOutIcon, WaveIcon, MailIcon, CalendarIcon, SparkIcon, TrashIcon, RefreshIcon, ShieldIcon } from '@/components/icons';
 
 type Tab = 'chat' | 'notes' | 'reminders' | 'fitness';
@@ -112,6 +113,7 @@ export default function MayaPage() {
   const [workouts, setWorkouts] = useState<Workout[]>([]);
   const [dashLoading, setDashLoading] = useState(false);
   const [greeting, setGreeting] = useState('Hello');
+  const [activity, setActivity] = useState('');
 
   useEffect(() => {
     const h = Number(new Date().toLocaleString('en-IN', { hour: 'numeric', hour12: false, timeZone: 'Asia/Kolkata' }));
@@ -351,8 +353,11 @@ export default function MayaPage() {
           const data = part.slice(6).trim();
           if (data === '[DONE]') { streamDone = true; break outer; }
           try {
-            const { chunk } = JSON.parse(data) as { chunk: string };
+            const evt = JSON.parse(data) as { chunk?: string; tool?: string; phase?: string };
+            if (evt.tool && evt.phase === 'start') setActivity(TOOL_LABELS[evt.tool] ?? 'Working on it');
+            const chunk = evt.chunk;
             if (chunk) {
+              setActivity('');
               fullContent += chunk;
               setMessages(prev => prev.map(m =>
                 m.id === assistantId ? { ...m, content: fullContent } : m
@@ -377,6 +382,7 @@ export default function MayaPage() {
       speak('Something went wrong. Try again.');
     } finally {
       setLoading(false);
+      setActivity('');
       loadPending();
     }
   }, [loading, decide, speak, loadPending]);
@@ -596,6 +602,7 @@ export default function MayaPage() {
                                 <span className="w-2 h-2 bg-zinc-400 rounded-full dot-1" />
                                 <span className="w-2 h-2 bg-zinc-400 rounded-full dot-2" />
                                 <span className="w-2 h-2 bg-zinc-400 rounded-full dot-3" />
+                                {activity && <span className="ml-2 text-sm text-zinc-400">{activity}…</span>}
                               </div>}
                           {m.content && <span className="block text-[11px] text-zinc-400 mt-1.5">{formatTime(m.ts)}</span>}
                         </div>
