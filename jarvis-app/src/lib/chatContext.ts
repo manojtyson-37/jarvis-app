@@ -58,9 +58,13 @@ const CAL_ONLY = new RegExp(
   `|\\bdo i have (?:time|anything|something|plans)\\b.{0,12}\\b(?:today|tomorrow|tonight|this week|next week|${DAYS})\\b` +
   `|\\b(?:tell|read|give|walk) me (?:about )?(?:my |the )?(?:agenda|schedule|day|calendar)\\b`, 'i');
 // Inflected stems (moved, scheduling, titled…); "schedule" alone stays a noun ("show my schedule").
-const CAL_WRITE = /\b(?:add|creat|book|set|delet|remov|cancel|mov|reschedul|postpon|invit|remind|put|block|chang|updat|edit|renam|extend|shorten|shift|clear|sav|sync|pencil|fix|titl|nam|mark|push|drop|skip|declin|accept|swap|replac|mak)(?:e|s|es|ed|d|ing|ting|ping|king|ning)?\b|\bset up\b|\bfree up\b|\brepl(?:y|ies|ied)\b|\bschedul(?:ing|ed)\b|\bschedule (?:a|an|the|me|it|my|standup|lunch|call)\b/i;
+const CAL_WRITE = /\b(?:add|creat|book|set|delet|remov|cancel|mov|reschedul|postpon|invit|remind|put|block|chang|updat|edit|renam|extend|shorten|shift|clear|sav|sync|pencil|fix|titl|nam|mark|push|drop|skip|declin|accept|swap|replac|mak|rebook|reserv|insert|attach|assign|reassign|ditch|wipe|kill|trim|cut|erase|purg|overwrit|log|enter|slot|throw|prepar)(?:e|s|es|ed|d|ing|ting|ping|king|ning)?\b|\bset up\b|\bfree up\b|\brepl(?:y|ies|ied)\b|\bschedul(?:ing|ed)\b|\bschedule (?:a|an|the|me|it|my|standup|lunch|call)\b/i;
 const CAL_OTHER = /\b(notes?|minutes|transcript|action items?|fireflies|summar\w*|e-?mails?|mail|tickets?|drive|docs?|redash)\b/i;
+// A plain read is one short question. A second clause, a request word, or an implicit "make it X" cue means a write may
+// be hiding in it, so it stays on 'auto'. This guard is the primary defence; CAL_WRITE is a backup.
+const CAL_COMPOUND = /[.?!;,:]\s*\S|\b(and|then|also|please|now|but|instead|how about|what if|should be|to be|can you|could you|would you)\b/i;
 export function calendarReadIntent(message: string): boolean {
+  if (CAL_COMPOUND.test(message.trim())) return false;
   if (CAL_WRITE.test(message) || CAL_OTHER.test(message)) return false;
   if (CAL_ONLY.test(message)) return true;
   if (/\bam i (?:free|busy)\b/i.test(message)) return CAL_TIME.test(message);
