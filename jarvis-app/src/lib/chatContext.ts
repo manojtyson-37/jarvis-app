@@ -47,13 +47,22 @@ export function gmailLookupIntent(message: string): boolean {
 // Needs a calendar noun AND a read cue, and no write verb, so "put lunch on my calendar" or "clear my schedule" is never
 // forced into the read tool. Mixed read+write messages stay on 'auto'.
 const CAL_NOUN = /\b(calendar|agenda|schedule|meetings?|events?|appointments?|my day)\b/i;
-const CAL_READ = /\b(what|which|show|list|check|any|do i have|when|how|read|tell|give|walk)\b/i;
-const CAL_MY = /\b(my|i have|am i)\b/i;
-const CAL_TIME = /\b(today|tomorrow|tonight|this (?:week|morning|afternoon|evening|weekend)|next (?:week|meeting|event)|upcoming|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b\d{1,2}(?::\d\d)? ?(?:am|pm)\b/i;
-const CAL_ONLY = /\bwhat(?:'s|s| is)? (?:on|up|happening|going on)\b.{0,25}\b(today|tomorrow|tonight|this week|next week)\b|\bwhat do i have\b|\bam i (?:free|busy)\b|\bdo i have (?:time|anything|something|plans)\b.{0,25}\b(today|tomorrow|tonight|this week|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
-const CAL_WRITE = /\b(add|adding|create|book|booking|set up|delete|remove|cancel|move|reschedule|postpone|invite|remind|put|block|change|update|edit|rename|extend|shorten|shift|clear|free up|save|sync|pencil|fix|schedule (?:a|an|the|me|it|my|standup|lunch|call))\b/i;
+const CAL_READ = /\b(what|which|show|list|check|any|do i have|when|how)\b/i;
+const CAL_MY = /\b(my|am i)\b/i;
+const DAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday';
+const CAL_TIME = new RegExp(`\\b(today|tomorrow|tonight|this (?:week|morning|afternoon|evening|weekend)|next (?:week|meeting|event)|upcoming|${DAYS})\\b|\\b\\d{1,2}(?::\\d\\d)? ?(?:am|pm)\\b`, 'i');
+// Fixed phrasings only: loose cues like tell/give/read captured write requests ("give my 3pm meeting a new title").
+const CAL_ONLY = new RegExp(
+  `\\bwhat(?:'s|s| is)? (?:on|up|happening|going on)\\b.{0,25}\\b(?:today|tomorrow|tonight|this week|next week)\\W*$` +
+  `|\\bwhat do i have (?:on|planned|scheduled|coming up|lined up|today|tomorrow|tonight|this week|next week)\\b` +
+  `|\\bdo i have (?:time|anything|something|plans)\\b.{0,12}\\b(?:today|tomorrow|tonight|this week|next week|${DAYS})\\b` +
+  `|\\b(?:tell|read|give|walk) me (?:about )?(?:my |the )?(?:agenda|schedule|day|calendar)\\b`, 'i');
+// Inflected stems (moved, scheduling, titled…); "schedule" alone stays a noun ("show my schedule").
+const CAL_WRITE = /\b(?:add|creat|book|set|delet|remov|cancel|mov|reschedul|postpon|invit|remind|put|block|chang|updat|edit|renam|extend|shorten|shift|clear|sav|sync|pencil|fix|titl|nam|mark|push|drop|skip|declin|accept|swap|replac|mak)(?:e|s|es|ed|d|ing|ting|ping|king|ning)?\b|\bset up\b|\bfree up\b|\brepl(?:y|ies|ied)\b|\bschedul(?:ing|ed)\b|\bschedule (?:a|an|the|me|it|my|standup|lunch|call)\b/i;
 const CAL_OTHER = /\b(notes?|minutes|transcript|action items?|fireflies|summar\w*|e-?mails?|mail|tickets?|drive|docs?|redash)\b/i;
 export function calendarReadIntent(message: string): boolean {
   if (CAL_WRITE.test(message) || CAL_OTHER.test(message)) return false;
-  return CAL_ONLY.test(message) || (CAL_NOUN.test(message) && CAL_READ.test(message) && (CAL_MY.test(message) || CAL_TIME.test(message)));
+  if (CAL_ONLY.test(message)) return true;
+  if (/\bam i (?:free|busy)\b/i.test(message)) return CAL_TIME.test(message);
+  return CAL_NOUN.test(message) && CAL_READ.test(message) && (CAL_MY.test(message) || CAL_TIME.test(message));
 }
