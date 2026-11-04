@@ -9,7 +9,7 @@
 // Request frames ("is it possible to close…", "why not close…", "how do I close…") never excuse a bare verb, so they stay on auto.
 const LEAD = '(?:(?:hey|ok|okay|so|please|can you|could you|tell me|let me know)\\s+)*';
 const INTERROGATIVE = new RegExp(`^\\s*${LEAD}(?:what|what's|whats|which|who|whom|when|where|why|how|did|does|is|are|was|were|has|had|any)\\b`, 'i');
-const IMPERATIVE = new RegExp(`^\\s*${LEAD}(?:show|list|check|get|find|read|look|see|give me|latest|recent|status)\\b`, 'i');
+const IMPERATIVE = new RegExp(`^\\s*${LEAD}(?:show|list|check|get|find|read|look|see|give me|latest|recent|status|tell me about|summari[sz]e|describe|explain|pull up|fetch|view|display|anything on|any update on|update on)\\b`, 'i');
 const COMPOUND = /[.?!;,:&\n—–]\s*\S|\s-+\s|\b(?:and|then|also|but|so|plus|after|next|now|finally|please|kindly|just|can you|could you|would you|make it|if)\b/i;
 
 const TW = 'solve|finish|complete|shut|archive|remove|snooze|merge|transfer|move|pass|hand|take|unassign|send|link|prioritize|bump|tag|flag|star|tell|notify|ping|inform|message|email|fix|close|closing|resolve|resolving|reopen|escalate|assign|reassign|mark|note|comment|reply|respond|set|change|update|add|put|cancel|delete';
@@ -45,6 +45,10 @@ const make = (base: string) => {
     new RegExp(`\\b(?:latest|last|new|recent)\\s+(?:${words})s?\\b`, 'gi'),
     // plural nouns: "gmail labels", "notes", "replies"
     /\b(?:labels|notes|comments|replies|drafts|updates|changes|marks)\b/gi,
+    // "tell me about ticket 5"
+    /\btell me about\b/gi,
+    // "any update on ticket 5"
+    /\b(?:any|an?|the)\s+update\s+(?:on|for|about)\b|\bupdate\s+on\b/gi,
   ];
   // Past tense is also fine for a real question ("who closed ticket 5", "is ticket 5 closed", "who resolved it")
   const pastOk = [new RegExp(`\\b(?:${words})e?d\\b|\\breplied\\b`, 'gi')];
@@ -54,6 +58,7 @@ const T = make(TW);
 const M = make(MW);
 
 const veto = (set: ReturnType<typeof make>, message: string, needsOpener = false): boolean => {
+  message = message.replace(/[,\s]*\bplease\s*[?!.]*\s*$/i, '');
   if (REQUEST_FRAME.test(message) && !/^\s*please\s+(?:show|list|check|get)\b/i.test(message)) return true;
   // Tickets: a message with a ticket reference is a write unless it clearly reads, whatever verb it uses.
   if (needsOpener && !BARE_TICKET.test(message) && !TICKET_NOUN_LEAD.test(message) && !INTERROGATIVE.test(message) && !IMPERATIVE.test(message)) return true;
@@ -69,6 +74,9 @@ const veto = (set: ReturnType<typeof make>, message: string, needsOpener = false
   return set.any.test(rest);
 };
 
-export const ticketWriteIntent = (message: string): boolean => veto(T, message, true);
+// The read-allowlist rule needs a ticket reference to be meaningful; without one (an agent name after "which agent did you
+// mean?", "bob's queue") only the write-word rule applies, so those forced routes keep working.
+const TICKET_REF = /\bticket\s*#?\s*\d{4,}|#\d{4,}|^\s*\d{4,}\s*[?!.]*\s*$/i;
+export const ticketWriteIntent = (message: string): boolean => veto(T, message, TICKET_REF.test(message));
 // "send me the inbox summary" asks for a read, not for mail to go anywhere.
 export const mailWriteIntent = (message: string): boolean => veto(M, message.replace(/\bsend me\b/gi, 'give me'));
