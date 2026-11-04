@@ -6,10 +6,10 @@ import type { EmailSummary } from '@/lib/gmail';
 export interface ReplyIntent { who: string; text: string }
 
 // Whole-message template only (same reasoning as calendarReadIntent): anything else stays with the model.
-const REPLY_RE = /^(?:please\s+)?(?:reply|respond|write back)(?:\s+back)?\s+to\s+([a-z][a-z.'@_-]*(?:\s+[a-z][a-z.'@_-]*){0,2}?)(?:'s\s+(?:e-?mail|mail|message))?\s*(?:,|:|\s+(?:saying|and say|and tell (?:him|her|them)|telling (?:him|her|them)|with|that))\s*(.{1,400})$/i;
+const REPLY_RE = /^(?:please\s+)?(?:reply|respond|write back)(?:\s+back)?\s+to\s+([a-z][a-z.'@_-]*(?:\s+[a-z][a-z.'@_-]*){0,2}?)(?:'s\s+(?:e-?mail|mail|message))?\s*(?:,|:|\s+(?:saying|and say|and tell (?:him|her|them)|telling (?:him|her|them)|that))\s*(.{1,400})$/i;
 const NOT_A_NAME = /^(?:him|her|them|it|this|that|the|that one|this one|first|second|third|last|latest|all|everyone|everybody|me|my|an?|each)(?:\s|$)/i;
 // A second instruction hidden in the reply text means the model should see the whole message.
-const SECOND_TASK = /\b(?:and|then|also)\s+(?:cancel|delete|remind|schedule|book|add|forward|set|move|call|create|mark|close|resolve)\b|[;\n]/i;
+const SECOND_TASK = /\b(?:and|then|also)\s+(?:cancel|delete|remind|schedule|book|add|forward|set|move|call|create|mark|close|resolve|cc|bcc|send|email|text|share|attach)\b|\b(?:forward|cc|bcc)\b|@|^(?:an?\s+|the\s+)?(?:summary|status|report|update|list|latest)\b|[;\n]/i;
 
 export function parseReplyIntent(message: string): ReplyIntent | null {
   if (message.length > 600) return null;
@@ -49,7 +49,16 @@ export async function handleReply(intent: ReplyIntent, deps: ReplyDeps): Promise
   const found = await deps.fetchSummaries(`from:"${who}"`, 10);
   if (found === null) return { text: 'Gmail not configured or list failed.' };
   // Automated senders (no-reply, alerts) are never someone you reply to.
-  const people = found.filter(e => !e.automated && !BULK_SENDER.test(addressOf(e.from) ?? ''));
+  const tokens = who.toLowerCase().split(/\s+/).filter(t => t.length > 1);
+  const people = found.filter(e => {
+    const a = addressOf(e.from) ?? '';
+    if (e.automated || BULK_SENDER.test(a)) return false;
+    // Gmail's from: is a fuzzy match, so require the typed name in the real name or address, and drop senders whose
+    // display name pretends to be a different address ("bob@trusted.com" <attacker@evil.com>).
+    if (/@/.test(e.fromName) && !e.fromName.toLowerCase().includes(a)) return false;
+    const hay = `${e.fromName} ${a}`.toLowerCase();
+    return tokens.every(t => hay.includes(t));
+  });
   if (!people.length) return { text: `I couldn't find a recent email from "${who}", so nothing was queued.` };
   const byAddr = new Map<string, EmailSummary>();
   for (const e of people) {
@@ -62,9 +71,10 @@ export async function handleReply(intent: ReplyIntent, deps: ReplyDeps): Promise
     return { text: `More than one sender matches "${who}": ${options}. Say "reply to <address> saying …" and I'll queue it. Nothing was queued.` };
   }
   const [to, latest] = [...byAddr.entries()][0];
-  const subject = /^\s*re:/i.test(latest.subject) ? latest.subject.trim() : `Re: ${latest.subject.trim()}`;
+  const cleanSubject = latest.subject.replace(/[\r\n]+/g, ' ').trim();
+  const subject = /^re:/i.test(cleanSubject) ? cleanSubject : `Re: ${cleanSubject}`;
   const body = replyBody(intent.text);
   const status = await deps.queue('send_email', { to, subject, body });
-  const context = `Replying to ${latest.fromName}'s email "${latest.subject}"${latest.date ? ` (${latest.date})` : ''}.`;
+  const context = `Replying to ${latest.fromName} <${to}>, email "${cleanSubject}"${latest.date ? ` (${latest.date})` : ''}.`;
   return { text: `${context}\n${status}`, queued: { to, subject, body } };
 }

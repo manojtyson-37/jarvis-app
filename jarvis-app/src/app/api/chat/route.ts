@@ -785,7 +785,7 @@ export async function POST(req: NextRequest) {
   const agentNameMentioned = (text: string) => agentNameTokens.some(name =>
     new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:'s|s)?\\b`, 'i').test(text)
   );
-  const agentCountMatch = !ticketMatch && agentNameMentioned(message) && (
+  const agentCountMatch = !ticketMatch && !ticketWriteIntent(message) && agentNameMentioned(message) && (
     /\bticket(s)?\b.{0,40}\b(bucket|queue)\b|\b(bucket|queue)\b.{0,40}\bticket(s)?\b/i.test(message)
     || (
       /\bticket(s)?\b/i.test(message)
@@ -839,7 +839,7 @@ export async function POST(req: NextRequest) {
   // of the same word-boundary-safe agentNameMentioned() helper used above — reopening the
   // identical prefix-collision bug through a different path ("I love balsamic vinegar"
   // matching token "Sam" from an unrelated agent's name). Reuses the shared helper instead.
-  const awaitingAgentDisambiguation = awaitingAgentDisambiguationPrompt && agentNameMentioned(message);
+  const awaitingAgentDisambiguation = awaitingAgentDisambiguationPrompt && !ticketWriteIntent(message) && agentNameMentioned(message);
   const forcedToolChoice = ticketMatch
     ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
     : agentCountMatch
