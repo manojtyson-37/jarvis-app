@@ -7,9 +7,9 @@ export interface ReplyIntent { who: string; text: string }
 
 // Whole-message template only (same reasoning as calendarReadIntent): anything else stays with the model.
 const REPLY_RE = /^(?:please\s+)?(?:reply|respond|write back)(?:\s+back)?\s+to\s+([a-z][a-z.'@_-]*(?:\s+[a-z][a-z.'@_-]*){0,2}?)(?:'s\s+(?:e-?mail|mail|message))?\s*(?:,|:|\s+(?:saying|and say|and tell (?:him|her|them)|telling (?:him|her|them)|that))\s*(.{1,400})$/i;
-const NOT_A_NAME = /^(?:him|her|them|it|this|that|the|that one|this one|first|second|third|last|latest|all|everyone|everybody|me|my|an?|each)(?:\s|$)/i;
+const NOT_A_NAME = /^(?:ticket|agent|tickets|him|her|them|it|this|that|the|that one|this one|first|second|third|last|latest|all|everyone|everybody|me|my|an?|each)(?:\s|$)/i;
 // A second instruction hidden in the reply text means the model should see the whole message.
-const SECOND_TASK = /\b(?:and|then|also)\s+(?:cancel|delete|remind|schedule|book|add|forward|set|move|call|create|mark|close|resolve|cc|bcc|send|email|text|share|attach)\b|\b(?:forward|cc|bcc)\b|@|^(?:an?\s+|the\s+)?(?:summary|status|report|update|list|latest)\b|[;\n]/i;
+const SECOND_TASK = /\b(?:and|then|also)\s+(?:cancel|delete|remind|schedule|book|add|forward|set|move|call|create|mark|close|resolve|cc|bcc|send|email|text|share|attach|sms|notify|loop in|tell\s+\w+)\b|\bticket\b|\b(?:forward|cc|bcc)\b|@|^(?:an?\s+|the\s+)?(?:summary|status|report|update|list|latest)\b|[;\n]/i;
 
 export function parseReplyIntent(message: string): ReplyIntent | null {
   if (message.length > 600) return null;
@@ -17,7 +17,7 @@ export function parseReplyIntent(message: string): ReplyIntent | null {
   if (!m) return null;
   const who = m[1].trim().replace(/\s+(?:e-?mail|mail|message)$/i, '').replace(/'s$/i, '');
   const text = m[2].trim();
-  if (NOT_A_NAME.test(who) || SECOND_TASK.test(text)) return null;
+  if (who.replace(/[^a-z]/gi, '').length < 2 || NOT_A_NAME.test(who) || SECOND_TASK.test(text)) return null;
   return { who, text };
 }
 
@@ -50,6 +50,10 @@ export async function handleReply(intent: ReplyIntent, deps: ReplyDeps): Promise
   if (found === null) return { text: 'Gmail not configured or list failed.' };
   // Automated senders (no-reply, alerts) are never someone you reply to.
   const tokens = who.toLowerCase().split(/\s+/).filter(t => t.length > 1);
+  if (!tokens.length) return { text: 'Who should I reply to?' };
+  const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Whole-word match: "bob" must not pick up Bobby, "al" must not pick up Alan.
+  const wordRes = tokens.map(t => new RegExp(`(?:^|[^a-z0-9])${esc(t)}(?:[^a-z0-9]|$)`));
   const people = found.filter(e => {
     const a = addressOf(e.from) ?? '';
     if (e.automated || BULK_SENDER.test(a)) return false;
@@ -57,7 +61,7 @@ export async function handleReply(intent: ReplyIntent, deps: ReplyDeps): Promise
     // display name pretends to be a different address ("bob@trusted.com" <attacker@evil.com>).
     if (/@/.test(e.fromName) && !e.fromName.toLowerCase().includes(a)) return false;
     const hay = `${e.fromName} ${a}`.toLowerCase();
-    return tokens.every(t => hay.includes(t));
+    return wordRes.every(re => re.test(hay));
   });
   if (!people.length) return { text: `I couldn't find a recent email from "${who}", so nothing was queued.` };
   const byAddr = new Map<string, EmailSummary>();
