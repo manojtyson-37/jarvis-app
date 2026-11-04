@@ -9,7 +9,7 @@ export interface ReplyIntent { who: string; text: string }
 const REPLY_RE = /^(?:please\s+)?(?:reply|respond|write back)(?:\s+back)?\s+to\s+([a-z][a-z.'@_-]*(?:\s+[a-z][a-z.'@_-]*){0,2}?)(?:'s\s+(?:e-?mail|mail|message))?\s*(?:,|:|\s+(?:saying|and say|and tell (?:him|her|them)|telling (?:him|her|them)|that))\s*(.{1,400})$/i;
 const NOT_A_NAME = /^(?:ticket|agent|tickets|him|her|them|it|this|that|the|that one|this one|first|second|third|last|latest|all|everyone|everybody|me|my|an?|each)(?:\s|$)/i;
 // A second instruction hidden in the reply text means the model should see the whole message.
-const SECOND_TASK = /\b(?:and|then|also)\s+(?:cancel|delete|remind|schedule|book|add|forward|set|move|call|create|mark|close|resolve|cc|bcc|send|email|text|share|attach|sms|notify|loop in|tell\s+\w+)\b|\bticket\b|\b(?:forward|cc|bcc)\b|@|^(?:an?\s+|the\s+)?(?:summary|status|report|update|list|latest)\b|[;\n]/i;
+const SECOND_TASK = /\b(?:and|then|also)\s+(?:cancel|delete|remind|schedule|book|add|forward|set|move|call|create|mark|close|resolve|cc|bcc|send|email|text|share|attach|sms|notify|loop in|tell\s+\w+)\b|\bticket\b|^(?:notify|sms|text|tell|ask|call|email|message|ping)\b|\b(?:forward|cc|bcc)\b|@|^(?:an?\s+|the\s+)?(?:summary|status|report|update|list|latest)\b|[;\n]/i;
 
 export function parseReplyIntent(message: string): ReplyIntent | null {
   if (message.length > 600) return null;
