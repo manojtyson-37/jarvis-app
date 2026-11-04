@@ -14,12 +14,14 @@ import { parseReminderTime } from '@/lib/timeparser';
 import { getTicket, updateTicketStatus, addTicketNote, getLatestTicketInGroups, getOpenTicketCountForAgent, getAgentNameTokens, AGENT_DISAMBIGUATION_PREFIX } from '@/lib/freshdesk';
 import { getQueryResults, listQueries } from '@/lib/redash';
 import { searchLogs } from '@/lib/coralogix';
-import { listRecentEmails, getEmail, listLabels } from '@/lib/gmail';
+import { listRecentEmails, getEmail, listLabels, fetchMessageSummaries } from '@/lib/gmail';
 import { searchDrive, readDriveFile } from '@/lib/drive';
 import { historyForModel, gmailLookupIntent, isPlaceholderReply, calendarReadIntent } from '@/lib/chatContext';
 import { selectTools } from '@/lib/toolRouting';
 import { analysisIntent, GROUNDABLE, GROUNDED_SYSTEM, groundedUser, needsLookIds, driveReadableIds } from '@/lib/grounded';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
+import { parseReplyIntent, handleReply } from '@/lib/replyIntent';
+import { ticketWriteIntent, mailWriteIntent } from '@/lib/routingGuards';
 import { getGoogleAccessToken } from '@/lib/google';
 
 // Retries are handled here, not in the SDK: a daily-quota 429 carries a wait of many minutes, so the SDK would burn
@@ -740,7 +742,7 @@ export async function POST(req: NextRequest) {
   // with no narration pass left to catch the mismatch. Force the specific list_emails function
   // instead, matching the ticket pattern, and narrow the trigger to inbox-check phrasing (not
   // bare "email" — that would wrongly also fire on "what's my email address").
-  const ticketMatch = /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
+  const ticketMatch = ticketWriteIntent(message) ? null : /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
   // "latest ticket raised" / "any new tickets" — a recency question, distinct from a
   // specific-ID lookup (ticketMatch always wins when a real number is present). Routes to
   // get_latest_ticket, which returns full detail on the single newest ticket across Manoj's
@@ -749,7 +751,7 @@ export async function POST(req: NextRequest) {
   // Requires a recency/support word co-occurring with "ticket(s)" (same AND-shape as the
   // other forced-tool regexes below) — a bare "tickets" alone would also force this on
   // "I need two tickets for the concert", an unrelated message with no Freshdesk intent.
-  const ticketListMatch = !ticketMatch && /\b(latest|recent|newest|last|new|open|any|support|freshdesk|raised)\b.{0,20}\bticket(s)?\b|\bticket(s)?\b.{0,20}\b(latest|recent|newest|raised|support|freshdesk)\b/i.test(message);
+  const ticketListMatch = !ticketMatch && !ticketWriteIntent(message) && /\b(latest|recent|newest|last|new|open|any|support|freshdesk|raised)\b.{0,20}\bticket(s)?\b|\bticket(s)?\b.{0,20}\b(latest|recent|newest|raised|support|freshdesk)\b/i.test(message);
   // "how many tickets in X's bucket/queue" — a per-agent count, distinct from both the
   // specific-ID lookup and the single-latest-ticket lookup above. Checked before
   // ticketListMatch's broader "open"+"ticket" pattern so a count question doesn't get
@@ -793,7 +795,7 @@ export async function POST(req: NextRequest) {
   // A Gmail message ID is a long hex string — check for one BEFORE the general inbox-check
   // match below, so "show me email <id>" routes to get_email rather than getting swept into
   // the broader "show...email" inbox-check pattern and incorrectly forced to list_emails.
-  const emailIdMatch = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{10,}\b/i.test(message);
+  const emailIdMatch = !mailWriteIntent(message) && /\b(?=[0-9a-f]*[a-f])[0-9a-f]{10,}\b/i.test(message);
   // Scoped to email/Gmail context, not bare "label" — otherwise "what label would you give
   // this idea" or "add a label to this note" would wrongly force a Gmail tool call too.
   const labelMatch = /\blabels?\b.{0,20}\b(email|gmail|inbox)\b|\b(email|gmail|inbox)\b.{0,20}\blabels?\b/i.test(message);
@@ -805,7 +807,7 @@ export async function POST(req: NextRequest) {
   const sendMailMatch = !emailIdMatch && !labelMatch
     && (/\b(send|shoot|fire off)\s+(?:an?\s+|the\s+)?(?:e-?mail|mail)\b.{0,80}(?:\bto\b|@)/i.test(message) || /\b(?:e-?mail|mail)\s+[\w.+-]+@[\w-]+\.\w+/i.test(message))
     && !/\b(draft|compose|write|unread|inbox)\b|\bsend me\b|\b(don'?t|do not|never|not)\b/i.test(message);
-  const inboxCheckMatch = !emailIdMatch && !labelMatch
+  const inboxCheckMatch = !emailIdMatch && !labelMatch && !mailWriteIntent(message)
     && (/\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message) || gmailLookupIntent(message));
   // "redash" is distinctive enough on its own (unlike "ticket") that it doesn't need the
   // AND-of-two-signals treatment the email/ticket regexes above do — no unrelated casual
@@ -889,6 +891,29 @@ export async function POST(req: NextRequest) {
 
       // Top-level net: any unhandled throw settles the controller so the stream is never leaked
       (async () => {
+        // "reply to Bob saying yes": looked up and queued for approval without the model (see replyIntent.ts).
+        const replyIntent = parseReplyIntent(message);
+        if (replyIntent) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ tool: 'send_email', phase: 'start' })}\n\n`));
+          let text: string;
+          let queued: { to: string; subject: string; body: string } | undefined;
+          try {
+            ({ text, queued } = await handleReply(replyIntent, {
+              fetchSummaries: fetchMessageSummaries,
+              queue: (tool, args) => queueAction(userId, tool, args),
+            }));
+          } catch (e) {
+            console.error('reply handler failed:', (e as Error).message);
+            text = 'Could not set that reply up. Nothing was queued.';
+          }
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            tool: 'send_email', phase: 'end', ok: !!queued,
+            ...(evalUser ? { args: JSON.stringify(queued ?? {}), result: text.slice(0, 700) } : {}),
+          })}\n\n`));
+          await finish(text);
+          return;
+        }
+
         const msgs: Groq.Chat.ChatCompletionMessageParam[] = [
           ...historyForModel(history),
           { role: 'user', content: message },
