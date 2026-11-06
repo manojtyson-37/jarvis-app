@@ -54,7 +54,13 @@ async function withFallback<T>(call: (model: string) => Promise<T>, startedAt: n
       console.warn('primary model failed to call the forced tool, using fallback model:', (e as Error).message?.slice(0, 200));
       return call(FALLBACK_MODEL);
     }
-    if ((e as { status?: number }).status !== 429) throw e;
+    // "over capacity" (503) and other server-side or network failures of the primary: the other model is a different deployment.
+    const status = (e as { status?: number }).status;
+    if (status === undefined || (status >= 500 && status < 600)) {
+      console.warn('primary model unavailable, using fallback model:', (e as Error).message?.slice(0, 200));
+      return call(FALLBACK_MODEL);
+    }
+    if (status !== 429) throw e;
     const wait = retryWaitMs(e);
     if (wait !== null && wait <= MAX_WAIT_MS && Date.now() - startedAt < WAIT_BUDGET_MS) {
       await new Promise(r => setTimeout(r, wait + 250));
