@@ -26,7 +26,7 @@ import { getGoogleAccessToken } from '@/lib/google';
 
 // Retries are handled here, not in the SDK: a daily-quota 429 carries a wait of many minutes, so the SDK would burn
 // seconds of backoff before we ever reached the fallback.
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY, maxRetries: 0 });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY, maxRetries: 0, timeout: 20000 });
 
 // Free-tier Groq caps each model at 200k tokens/day (and 8k/minute). A short per-minute limit is waited out once;
 // a daily limit goes straight to a second model with its own quota so Maya keeps answering.
@@ -45,6 +45,9 @@ function retryWaitMs(e: unknown): number | null {
 // Waits stack across the several model calls of one turn, so a turn that has already run long skips the wait.
 const WAIT_BUDGET_MS = 25000;
 
+// No status means the request never got a response (connection error, timeout); 5xx means Groq itself is failing.
+const isUnavailable = (status?: number) => status === undefined || (status >= 500 && status < 600);
+
 async function withFallback<T>(call: (model: string) => Promise<T>, startedAt: number): Promise<T> {
   try {
     return await call(PRIMARY_MODEL);
@@ -56,7 +59,7 @@ async function withFallback<T>(call: (model: string) => Promise<T>, startedAt: n
     }
     // "over capacity" (503) and other server-side or network failures of the primary: the other model is a different deployment.
     const status = (e as { status?: number }).status;
-    if (status === undefined || (status >= 500 && status < 600)) {
+    if (isUnavailable(status)) {
       console.warn('primary model unavailable, using fallback model:', (e as Error).message?.slice(0, 200));
       return call(FALLBACK_MODEL);
     }
@@ -64,7 +67,7 @@ async function withFallback<T>(call: (model: string) => Promise<T>, startedAt: n
     const wait = retryWaitMs(e);
     if (wait !== null && wait <= MAX_WAIT_MS && Date.now() - startedAt < WAIT_BUDGET_MS) {
       await new Promise(r => setTimeout(r, wait + 250));
-      try { return await call(PRIMARY_MODEL); } catch (e2) { if ((e2 as { status?: number }).status !== 429) throw e2; }
+      try { return await call(PRIMARY_MODEL); } catch (e2) { const s2 = (e2 as { status?: number }).status; if (isUnavailable(s2)) return call(FALLBACK_MODEL); if (s2 !== 429) throw e2; }
     }
     console.warn('primary model rate limited, using fallback model');
     return call(FALLBACK_MODEL);
