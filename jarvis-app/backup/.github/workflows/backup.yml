@@ -1,0 +1,116 @@
+name: nightly-db-backup
+
+on:
+  schedule:
+    - cron: '30 20 * * *' # 02:00 IST daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Public key only. The matching private key is held offline by the owner, so nothing stored in
+      # GitHub (secrets or artifacts) can decrypt a backup.
+      AGE_RECIPIENT: age134nwqcwgk65ez2zjfly3cqxqajhf0kercefexrwcrm3em6sl2gjs44hx5d
+      # Throwaway database used only to prove the dump restores. Never reachable from outside the runner.
+      RESTORE_PGPASSWORD: restore-test
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: restore-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Install PostgreSQL 17 client and age
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17 age
+          pg_dump --version
+
+      - name: Dump the public schema
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_DB_URL}" ]; then echo "SUPABASE_DB_URL secret is empty" >&2; exit 1; fi
+          # Session pooler only: the direct db.<ref>.supabase.co host is IPv6-only and fails from GitHub runners.
+          case "${SUPABASE_DB_URL}" in
+            *pooler.supabase.com:5432/*) ;;
+            *) echo "SUPABASE_DB_URL must be the session pooler (host *.pooler.supabase.com, port 5432)" >&2; exit 1 ;;
+          esac
+          # Public schema only: the app does not use Supabase Auth, and public holds all Maya data.
+          pg_dump "$SUPABASE_DB_URL" --schema=public --no-owner --no-privileges --format=custom --file="$RUNNER_TEMP/maya-public.dump"
+          pg_restore --list "$RUNNER_TEMP/maya-public.dump" > "$RUNNER_TEMP/toc.txt"
+          tables=$(grep -c ' TABLE DATA ' "$RUNNER_TEMP/toc.txt" || true)
+          echo "table data entries in dump: ${tables}"
+          # Maya has 15 tables. A floor of 10 catches a truncated or wrong-schema dump.
+          if [ "${tables}" -lt 10 ]; then echo "dump has too few tables (${tables}), refusing to keep it" >&2; exit 1; fi
+
+      # A failed restore test must not stop the backup from shipping (a backup that might not restore still
+      # beats none), but it must turn the job red so GitHub emails the owner. See the last step.
+      - name: Prove the dump restores
+        id: restore
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          export PGPASSWORD="$RESTORE_PGPASSWORD"
+          # A -n public dump contains CREATE SCHEMA public, so drop the default one first. Pre-create what a
+          # Supabase dump may reference: the extensions schema and the three API roles.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          drop schema public cascade;
+          create schema if not exists extensions;
+          do $$
+          declare r text;
+          begin
+            foreach r in array array['anon', 'authenticated', 'service_role'] loop
+              if not exists (select 1 from pg_roles where rolname = r) then
+                execute format('create role %I nologin', r);
+              end if;
+            end loop;
+          end $$;
+          SQL
+          pg_restore --no-owner --exit-on-error -h localhost -U postgres -d postgres "$RUNNER_TEMP/maya-public.dump"
+          restored=$(psql -h localhost -U postgres -d postgres -Atc "select count(*) from information_schema.tables where table_schema='public' and table_type='BASE TABLE'")
+          echo "tables restored into scratch database: ${restored}"
+          if [ "${restored}" -lt 10 ]; then echo "restore produced too few tables" >&2; exit 1; fi
+
+      - name: Encrypt
+        run: |
+          set -euo pipefail
+          stamp=$(date -u +%Y%m%dT%H%M%SZ)
+          out="maya-public-${stamp}.dump.age"
+          age -r "$AGE_RECIPIENT" -o "$out" "$RUNNER_TEMP/maya-public.dump"
+          shred -u "$RUNNER_TEMP/maya-public.dump" || rm -f "$RUNNER_TEMP/maya-public.dump"
+          size=$(stat -c%s "$out")
+          echo "encrypted size: ${size} bytes"
+          if [ "${size}" -lt 2048 ]; then echo "encrypted dump suspiciously small" >&2; exit 1; fi
+          echo "BACKUP_FILE=${out}" >> "$GITHUB_ENV"
+
+      - name: Upload encrypted backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: maya-db-backup
+          path: ${{ env.BACKUP_FILE }}
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Fail the job if the restore test failed
+        if: steps.restore.outcome == 'failure'
+        run: |
+          echo "Backup was encrypted and uploaded, but it did NOT restore into a scratch postgres:17. Check the 'Prove the dump restores' step." >&2
+          exit 1

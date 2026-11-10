@@ -1,8 +1,20 @@
 import { createClient } from '@supabase/supabase-js';
 
+// Server-only client. Every importer is a server route or lib, so it uses the
+// service-role key, which bypasses RLS. RLS is enabled with no policies on every
+// public table, so the anon key cannot read or write anything.
+// Never give this key a NEXT_PUBLIC_ name and never import this file from a
+// 'use client' module.
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!serviceRoleKey) {
+  // Fail loudly. Falling back to the anon key would silently break every query once RLS is on.
+  throw new Error('SUPABASE_SERVICE_ROLE_KEY is not set');
+}
+
 export const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  serviceRoleKey,
+  { auth: { persistSession: false, autoRefreshToken: false } }
 );
 
 // ── Notes ──────────────────────────────────────────────────────────────────
