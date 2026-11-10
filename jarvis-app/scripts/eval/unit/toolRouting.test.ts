@@ -3,6 +3,8 @@ let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'F
 const has = (m: string, t: string, ctx: string[] = [], forced?: string) => selectToolNames(m, ctx, forced).has(t);
 ok('mail msg -> list_emails', has('any unread email?', 'list_emails'));
 ok('mail msg excludes ticket tools', !has('any unread email?', 'get_freshdesk_ticket'));
+for (const m of ['Any job roles where I am moved to next stage rejected?', 'Did any company reject me?', 'Have I been shortlisted anywhere?', 'which applications moved to the next round', 'Any update on my Razorpay application?', 'anything from HDFC bank?', 'heard back from Cimpress?', 'any interview calls?']) ok('job/company mail question -> list_emails offered: ' + m, has(m, 'list_emails'));
+ok('unrelated chat gets no mail tools', !has('log a 1 hr run', 'list_emails') && !has('what is my role in the project', 'list_emails') && !has('what is the weather in Bangalore', 'list_emails') && !has('log 45 min run', 'list_emails'));
 ok('calendar', has("what's on my calendar today", 'get_calendar_events'));
 ok('drive', has('search my drive for Urban Company', 'search_drive'));
 ok('reminder', has('remind me to call the bank in 2 hours', 'set_reminder'));

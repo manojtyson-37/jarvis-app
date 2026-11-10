@@ -40,9 +40,9 @@ export function driveReadableIds(listText: string, max = 2): string[] {
   return ids;
 }
 
-// What an inbox question is actually about ("jobs" in "What about jobs in my inbox?"), or null for a plain inbox
-// check. A short follow-up like "In my inbox" borrows the topic of the previous user message ("What about jobs?").
-// On 2026-11-10 that exact pair got the raw inbox list back instead of an answer about job emails.
+// Words left in an inbox question once filler is removed ("jobs" in "What about jobs in my inbox?"). Empty means a plain
+// inbox check. This only decides whether to ask the model what the subject is (see inboxSearch.ts); it never decides
+// the subject itself, and there is no limit on how many words may be left.
 const INBOX_FILLER = new Set(('what whats about any anything something is are was were there my me i in on the a an of for to from ' +
   'email emails mail mails e-mail gmail inbox unread new latest recent check show list read see give tell get all ' +
   'today yesterday this week do does did have has got need needs respond reply answer should can could you please hey ' +
@@ -50,15 +50,7 @@ const INBOX_FILLER = new Set(('what whats about any anything something is are wa
   'with at by up out pending important urgent find search look looking let know if else some few ' +
   'summarise summarize summary triage prioritise prioritize go through digest overview tldr').split(' '));
 
-function topicOf(text: string): string | null {
-  const words = text.toLowerCase().replace(/[^a-z0-9@.\s-]/g, ' ').split(/\s+/).filter(Boolean);
-  const left = words.filter(w => !INBOX_FILLER.has(w));
-  return left.length && left.length <= 4 ? left.join(' ') : null;
-}
-
-export function inboxTopic(message: string, previousUserMessage?: string): string | null {
-  const own = topicOf(message);
-  if (own) return own;
-  if (previousUserMessage && message.trim().split(/\s+/).length <= 4) return topicOf(previousUserMessage);
-  return null;
+export function inboxSubjectWords(text: string): string[] {
+  const words = text.toLowerCase().replace(/[^a-z0-9@.\s-]/g, ' ').split(/\s+/).map(w => w.replace(/^[.-]+|[.-]+$/g, '')).filter(Boolean);
+  return words.filter(w => !INBOX_FILLER.has(w));
 }

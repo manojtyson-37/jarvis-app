@@ -18,7 +18,8 @@ import { listRecentEmails, getEmail, listLabels, fetchMessageSummaries } from '@
 import { searchDrive, readDriveFile } from '@/lib/drive';
 import { historyForModel, gmailLookupIntent, isPlaceholderReply, calendarReadIntent } from '@/lib/chatContext';
 import { selectTools } from '@/lib/toolRouting';
-import { analysisIntent, GROUNDABLE, GROUNDED_SYSTEM, groundedUser, needsLookIds, driveReadableIds, inboxTopic } from '@/lib/grounded';
+import { analysisIntent, GROUNDABLE, GROUNDED_SYSTEM, groundedUser, needsLookIds, driveReadableIds } from '@/lib/grounded';
+import { answerInboxTopic } from '@/lib/inboxSearch';
 import { parseStandingInstruction, ruleSavedReply, rulesBlock } from '@/lib/instructions';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { parseReplyIntent, handleReply } from '@/lib/replyIntent';
@@ -378,7 +379,7 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'list_emails',
-      description: "List recent emails from Manoj's Gmail inbox, optionally filtered by a Gmail search query.",
+      description: "List recent emails from Manoj's Gmail inbox, optionally filtered by a Gmail search query. Also the tool for anything that reaches him by email: job applications, interview stages, rejections, recruiters, bank/card alerts, orders, a company or a person.",
       parameters: {
         type: 'object',
         properties: {
@@ -882,7 +883,6 @@ export async function POST(req: NextRequest) {
   const ruleTexts = rules.map(r => r.fact);
   // "What about jobs?" then "In my inbox": the question is about job emails, not the whole inbox.
   const prevUser = [...history].slice(-2).reverse().find(h => h.role === 'user')?.content;
-  const topic = inboxCheckMatch && !analysisIntent(message) ? inboxTopic(message, prevUser) : null;
 
   await appendConversation(userId, 'user', message);
 
@@ -1016,13 +1016,52 @@ export async function POST(req: NextRequest) {
           const fastResults: string[] = [];
           const queuedNotes: string[] = []; // gated-tool queue text, appended verbatim in mixed turns
 
+          // An inbox question about one subject ("Any job roles where I am moved to next stage rejected?"): search Gmail
+          // for that subject and answer from the matched emails (inboxSearch.ts). Runs whenever list_emails is the only
+          // tool picked, forced or not, since his question may not mention the inbox at all. A plain check falls through
+          // to the usual list; so does any Gmail or answer failure, rather than a guess.
+          let topicStartSent = false;
+          if (turns === 1 && toolCalls.length === 1 && toolCalls[0].function.name === 'list_emails' && !analysisIntent(message)) {
+            path.push('inbox-topic');
+            topicStartSent = true;
+            send(encoder.encode(`data: ${JSON.stringify({ tool: 'list_emails', phase: 'start' })}\n\n`));
+            try {
+              const r = await answerInboxTopic(message, prevUser, {
+                llm: async (system, user, maxTokens) => {
+                  const c = await wf(model => groq.chat.completions.create({
+                    ...fallbackOpts(model),
+                    model,
+                    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+                    temperature: 0,
+                    max_tokens: model === PRIMARY_MODEL ? maxTokens : maxTokens + 500,
+                  }));
+                  return c.choices[0]?.message?.content ?? '';
+                },
+                search: (q, max) => fetchMessageSummaries(q, max, max),
+                // getEmail reports failures as text ("Gmail fetch failed: 429"); only a real email may reach the model.
+                read: async id => { const e = await getEmail(id); return e.startsWith('From: ') ? e : ''; },
+                rules: rulesBlock(ruleTexts) || undefined,
+              });
+              if (r.kind === 'answer') {
+                console.log(`[inbox-topic] matched=${r.matched} query=${JSON.stringify(r.query.slice(0, 200))}`);
+                send(encoder.encode(`data: ${JSON.stringify({ tool: 'list_emails', phase: 'end', ok: true, ...(evalUser ? { args: JSON.stringify({ query: r.query }) } : {}) })}\n\n`));
+                if (settled) return;
+                await finish(r.text);
+                return;
+              }
+            } catch (e) {
+              console.error('[inbox-topic] failed, showing the list:', (e as Error).message);
+            }
+            if (settled) return;
+          }
+
           for (const tc of toolCalls) {
             // The deadline already answered: running more tools now would repeat them when Manoj asks again.
             if (settled) return;
             let result: string;
             path.push(tc.function.name);
             // Progress event so the UI can show "Checking Gmail…". Unknown keys are ignored by older clients.
-            send(encoder.encode(`data: ${JSON.stringify({ tool: tc.function.name, phase: 'start' })}\n\n`));
+            if (!(topicStartSent && tc.function.name === 'list_emails')) send(encoder.encode(`data: ${JSON.stringify({ tool: tc.function.name, phase: 'start' })}\n\n`));
             try {
               const targs = JSON.parse(tc.function.arguments) as Record<string, unknown>;
               // The model sometimes truncates an id it was handed ("1a10115c…" became "1a"). An id the user
@@ -1030,11 +1069,6 @@ export async function POST(req: NextRequest) {
               if (tc.function.name === 'get_email' && toolCalls.filter(t => t.function.name === 'get_email').length === 1) {
                 const typed = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{10,}\b/i.exec(message)?.[0];
                 if (typed && targs.message_id !== typed) targs.message_id = typed;
-              }
-              // A topic question needs recent mail, read or not; the model's default "is:unread" would miss most of it.
-              if (tc.function.name === 'list_emails' && topic && (!targs.query || targs.query === 'is:unread')) {
-                targs.query = 'newer_than:14d';
-                targs.max_results = Math.max(Number(targs.max_results) || 0, 25);
               }
               result = await executeTool(tc.function.name, targs, userId);
             } catch (e) {
@@ -1051,8 +1085,7 @@ export async function POST(req: NextRequest) {
           }
 
           // "Summarise / read through / prioritise" over read-only tool data: answer from the data alone.
-          const topicOnly = !!topic && toolCalls.length > 0 && toolCalls.every(tc => tc.function.name === 'list_emails');
-          if ((analysisIntent(message) || topicOnly) && toolCalls.length > 0 && toolCalls.every(tc => GROUNDABLE.has(tc.function.name)) && !toolResults.some(t => String(t.content).startsWith('Tool error'))) {
+          if (analysisIntent(message) && toolCalls.length > 0 && toolCalls.every(tc => GROUNDABLE.has(tc.function.name)) && !toolResults.some(t => String(t.content).startsWith('Tool error'))) {
             try {
               // Each section has its own cap so appended bodies / file text are never silently cut off.
               const listed = toolResults.map(t => String(t.content)).join('\n\n');
@@ -1070,7 +1103,7 @@ export async function POST(req: NextRequest) {
               const g = await wf(model => groq.chat.completions.create({
                 ...fallbackOpts(model),
                 model,
-                messages: [{ role: 'system', content: [GROUNDED_SYSTEM, rulesBlock(ruleTexts)].filter(Boolean).join('\n\n') }, { role: 'user', content: groundedUser(topicOnly ? `${message} (he wants only the emails about: ${topic})` : message, data) }],
+                messages: [{ role: 'system', content: [GROUNDED_SYSTEM, rulesBlock(ruleTexts)].filter(Boolean).join('\n\n') }, { role: 'user', content: groundedUser(message, data) }],
                 temperature: 0.2,
                 max_tokens: model === PRIMARY_MODEL ? 450 : 800,
               }));

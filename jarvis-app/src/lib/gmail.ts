@@ -73,17 +73,49 @@ function formatEmailDate(raw: string): string {
   return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
 }
 
-function extractPlainText(part: GmailMessagePart | undefined, depth = 0): string {
+function findPart(part: GmailMessagePart | undefined, mime: string, depth = 0): string {
   if (!part || depth > 10) return '';
-  if (part.mimeType === 'text/plain' && part.body?.data) return decodeBase64Url(part.body.data);
+  if (part.mimeType === mime && part.body?.data) return decodeBase64Url(part.body.data);
   for (const p of part.parts ?? []) {
-    const text = extractPlainText(p, depth + 1);
+    const text = findPart(p, mime, depth + 1);
     if (text) return text;
   }
-  // Fallback only for text parts — avoids dumping raw HTML or decoding binary attachment
-  // bytes as if they were utf-8 body text.
-  if (part.mimeType?.startsWith('text/') && part.body?.data) return decodeBase64Url(part.body.data);
   return '';
+}
+
+// The plain-text part, unless the HTML part says clearly more. LinkedIn's "Your application to X" plain part has only
+// boilerplate while the HTML part carries the actual update ("Unfortunately, we will not be moving forward"); an
+// HTML-only email (Workday, many hiring systems) used to come back as raw markup. Never decodes non-text parts.
+export function pickBodyText(plain: string, html: string): string {
+  const fromHtml = html ? htmlToText(html) : '';
+  const p = plain.trim();
+  // Compared without links: a plain part that is mostly tracking URLs is not "more".
+  const textLen = (t: string) => t.replace(/<?https?:\/\/\S+>?/g, '').replace(/\s+/g, ' ').trim().length;
+  return textLen(fromHtml) > textLen(p) + 150 ? fromHtml : p || fromHtml;
+}
+
+function extractPlainText(part: GmailMessagePart | undefined): string {
+  return pickBodyText(findPart(part, 'text/plain'), findPart(part, 'text/html'));
+}
+
+const HTML_NAMED: Record<string, string> = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", copy: '©', middot: '·', ndash: '–', mdash: '—', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', hellip: '…', bull: '•', zwnj: '' };
+
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<(style|script|head|title)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/h[1-6]|\/table)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e: string) => {
+      if (e[0] === '#') { const n = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : ' '; }
+      const k = e.toLowerCase();
+      return Object.hasOwn(HTML_NAMED, k) ? HTML_NAMED[k] : m;
+    })
+    // Preheader padding (U+034F, zero-width and soft-hyphen runs) is invisible but long enough to bury the text.
+    .replace(/[\u034f\u00ad\u200b-\u200d\u2060\ufeff]/g, '')
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/ *\n[ \n]*/g, '\n')
+    .trim();
 }
 
 export async function listLabels(): Promise<string> {
@@ -118,10 +150,10 @@ export interface EmailSummary {
 
 // Shared by listRecentEmails (chat tool, formats to a display string) and the proactive
 // label-monitoring cron (needs structured per-message data to check/mark dedup state).
-export async function fetchMessageSummaries(query: string, maxResults = 10): Promise<EmailSummary[] | null> {
+export async function fetchMessageSummaries(query: string, maxResults = 10, cap = 25): Promise<EmailSummary[] | null> {
   const token = await getGoogleAccessToken();
   if (!token) return null;
-  const capped = Math.min(Math.max(maxResults, 1), 25);
+  const capped = Math.min(Math.max(maxResults, 1), Math.min(cap, 50));
 
   const listRes = await fetch(
     `https://www.googleapis.com/gmail/v1/users/me/messages?maxResults=${capped}&q=${encodeURIComponent(query)}`,

@@ -2,7 +2,9 @@
 // per call, and the free Groq tier allows 8k tokens/minute, so a full set made every second message wait ~40s.
 const CATEGORIES: { tools: string[]; re: RegExp }[] = [
   { tools: ['list_emails', 'get_email', 'send_email', 'list_labels'],
-    re: /\b(e-?mails?|mails?|gmail|inbox|unread|labels?|respond|reply|replied|message from|sender|newsletter|send|sent|write|wrote|reach(?:ed)? out)\b|\b(?=[0-9a-f]*[a-f])[0-9a-f]{10,}\b|\[(?:automated|needs-look)\]/i },
+    // Job-search updates arrive only by email; on 2026-11-10 "Any job roles where I am moved to next stage rejected?"
+    // got "I don't have a tool to track job applications" whenever the chat before it was not about email.
+    re: /\b(e-?mails?|mails?|gmail|inbox|unread|labels?|respond|reply|replied|message from|sender|newsletter|send|sent|write|wrote|reach(?:ed)? out|jobs?|applications?|applied|applying|candidacy|interviews?|shortlist(?:ed)?|reject(?:ed|ions?)?|recruiters?|hiring|offer letter|next (?:stage|round|steps?)|anything from|heard (?:back )?from|any (?:updates?|news) (?:from|on))\b|\b(?=[0-9a-f]*[a-f])[0-9a-f]{10,}\b|\[(?:automated|needs-look)\]/i },
   { tools: ['get_calendar_events', 'create_calendar_event', 'delete_calendar_event'],
     re: /\b(calendar|schedule|scheduled|reschedule|meeting|meetings|event|events|appointment|agenda|invite|book|free|busy|cancel|move|postpone|today|tomorrow|tonight|this week|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b\d{1,2}\s?(?:am|pm)\b/i },
   { tools: ['search_drive', 'read_drive_file'],

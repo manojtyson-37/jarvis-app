@@ -1,5 +1,5 @@
 import { parseStandingInstruction as p, ruleKey, rulesBlock } from '../../../src/lib/instructions';
-import { inboxTopic } from '../../../src/lib/grounded';
+import { inboxSubjectWords } from '../../../src/lib/grounded';
 import { mailWriteIntent } from '../../../src/lib/routingGuards';
 let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
 
@@ -36,13 +36,11 @@ ok('rules block empty when none', rulesBlock([]) === '');
 ok('rules block lists rules and says they override', /override/.test(rulesBlock(['Be polite'])) && rulesBlock(['Be polite']).includes('- Be polite'));
 
 // Topic of an inbox question: what to filter for, or null for a plain inbox check.
-ok('topic: jobs in inbox', inboxTopic('What about jobs in my inbox?') === 'jobs');
-ok('topic: follow-up takes previous question', inboxTopic('In my inbox', 'What about jobs?') === 'jobs');
-ok('topic: any job emails', inboxTopic('any job emails?') === 'job');
-for (const m of ['summarise my inbox', 'triage my inbox', 'go through my inbox']) ok(`no topic: ${m}`, inboxTopic(m) === null);
-ok('topic: from amazon', inboxTopic('anything from amazon in my inbox') === 'amazon');
-for (const m of ['check my inbox', 'any unread email?', 'Gmail', 'show me my emails', 'Any email I need to respond to?', 'what is in my inbox today']) ok(`no topic: ${m}`, inboxTopic(m) === null);
-ok('long message does not borrow previous topic', inboxTopic('check my inbox for anything new please', 'What about jobs?') === null);
+// Subject words only gate whether the model is asked what the subject is; see inboxSearch.test.ts for the rest.
+ok('subject words: jobs in inbox', inboxSubjectWords('What about jobs in my inbox?').join() === 'jobs');
+ok('subject words: from amazon', inboxSubjectWords('anything from amazon in my inbox').join() === 'amazon');
+ok('subject words: no length limit', inboxSubjectWords('Any job roles where I am moved to next stage rejected?').length >= 6);
+for (const m of ['summarise my inbox', 'triage my inbox', 'go through my inbox', 'check my inbox', 'any unread email?', 'Gmail', 'show me my emails', 'what is in my inbox today']) ok(`no subject words: ${m}`, inboxSubjectWords(m).length === 0);
 
 // Inbox reads phrased as a request frame keep their forced read; real write requests still veto it.
 for (const m of ['What about jobs in my inbox?', 'how about my unread email', 'any new message from Bob in my inbox', 'what about email from amazon in my inbox', 'did Bob email me?', 'who emailed me today?', "tell me what's in my inbox", 'tell me my unread emails', 'mail from bob?', 'message from hr?', 'email from bob today?', 'Email ids from today', 'email summary please']) ok(`read, not write: ${m}`, !mailWriteIntent(m));
