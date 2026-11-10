@@ -196,7 +196,8 @@ export async function markReminderFired(userId: string, reminderId: string) {
 
 export async function saveMemoryFacts(userId: string, facts: { fact: string; category: string }[]) {
   if (!facts.length) return;
-  const rows = facts.map(f => ({ user_id: userId, fact: f.fact, category: f.category }));
+  // "instruction" rows are standing rules and are written only by saveRule(); this path never creates one.
+  const rows = facts.map(f => ({ user_id: userId, fact: f.fact, category: f.category.trim().toLowerCase() === 'instruction' ? 'general' : f.category }));
   const { error } = await supabase.from('maya_memory').insert(rows);
   if (error) throw error;
 }

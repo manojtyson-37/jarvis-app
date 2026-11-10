@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 import { getRecentConversations, saveEvolutionLog, saveMemoryFacts, getPushSubscriptions, getPromptFacts } from '@/lib/supabase';
 import { ruleKey } from '@/lib/instructions';
+import { safeFactCategory, isReservedFactCategory, FACT_CATEGORIES } from '@/lib/memoryCategory';
 import webpush from 'web-push';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -26,7 +27,7 @@ export async function GET(req: Request) {
 
   const SYSTEM = `Analyze this AI assistant conversation log between Manoj (USER) and his assistant Maya. Output ONLY a JSON object with:
 - gaps: array of {question, issue} where Maya failed, ignored an instruction, or said it couldn't help (max 5)
-- new_facts: array of {fact, category} — durable facts about Manoj himself (goals, preferences, people, habits). Never ticket numbers, email ids, one-off requests, test messages or anything Maya said.
+- new_facts: array of {fact, category} (category one of: ${FACT_CATEGORIES.join(', ')}) — durable facts about Manoj himself (goals, preferences, people, habits). Never ticket numbers, email ids, one-off requests, test messages or anything Maya said.
 - suggestions: array of {feature, priority:"high"|"medium", why} — features that would have helped (max 3)
 - summary: one sentence describing today's usage pattern`;
 
@@ -67,8 +68,8 @@ export async function GET(req: Request) {
   // Skip facts already known, so the prompt does not fill with repeats.
   const known = new Set((await getPromptFacts(USER_ID, 200)).map((f: { fact: string }) => ruleKey(f.fact)));
   const newFacts = (Array.isArray(parsed.new_facts) ? parsed.new_facts : [])
-    .filter(f => f && typeof f.fact === 'string' && f.fact.trim() && !known.has(ruleKey(f.fact)))
-    .map(f => ({ fact: f.fact.trim().slice(0, 300), category: String(f.category ?? 'general').slice(0, 40) }));
+    .filter(f => f && typeof f.fact === 'string' && f.fact.trim() && !known.has(ruleKey(f.fact)) && !isReservedFactCategory(f.category))
+    .map(f => ({ fact: f.fact.trim().slice(0, 300), category: safeFactCategory(f.category) }));
   // Rules are never taken from this log: it includes Maya's replies, which quote email and ticket text, so a hostile
   // email could become a standing rule. Rules come only from Manoj's own chat messages (instructions.ts) or the Rules list.
   const suggestions = parsed.suggestions ?? [];
