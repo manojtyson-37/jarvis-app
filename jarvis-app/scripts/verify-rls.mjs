@@ -92,7 +92,7 @@ function catalog() {
   if (!dbUrl) return null;
   try {
     const sql =
-      "select c.relname || '|' || c.relkind || '|' || c.relrowsecurity from pg_class c " +
+      "select c.relname || '|' || c.relkind::text || '|' || case when c.relrowsecurity then 't' else 'f' end from pg_class c " +
       "join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind in ('r','p','v','m') order by 1";
     const out = execFileSync('psql', [dbUrl, '-Atc', sql], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'ignore'] });
     const rls = new Map();

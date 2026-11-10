@@ -12,7 +12,7 @@ Nightly encrypted backup of the Maya (`maya-jarvis`) Supabase database, `public`
 
 ```bash
 gh run download --repo manojtyson-37/maya-db-backups -n maya-db-backup   # latest run, or add a run id
-age -d -i ~/maya-backup-age.key maya-public-<timestamp>.dump.age > restore.dump
+age -d -i ~/.maya-backup-age.key maya-public-<timestamp>.dump.age > restore.dump
 createdb maya_restore
 pg_restore --no-owner --dbname maya_restore restore.dump
 ```

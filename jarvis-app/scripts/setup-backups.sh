@@ -60,8 +60,11 @@ psql "$URL" -Atc "select 'connected to ' || current_database() || ', public tabl
 echo "5/6 store secret"
 printf '%s' "$URL" | gh secret set SUPABASE_DB_URL --repo "$REPO"
 touch "$envfile"
-grep -v '^SUPABASE_DB_URL=' "$envfile" > "$envfile.tmp" || true
+grep -v '^SUPABASE_DB_URL=' "$envfile" > "$envfile.tmp" || [ $? -eq 1 ]   # 1 = no lines left (fine); >1 = real error, abort
 printf 'SUPABASE_DB_URL=%s\n' "$URL" >> "$envfile.tmp"
+# .env.local holds every app secret: only replace it if the new file has all the other lines plus the new one.
+[ "$(wc -l < "$envfile.tmp")" -eq "$(( $(grep -vc '^SUPABASE_DB_URL=' "$envfile" || true) + 1 ))" ] \
+  || { echo "   .env.local rewrite check failed; .env.local left untouched" >&2; exit 1; }
 mv "$envfile.tmp" "$envfile"
 chmod 600 "$envfile"
 unset URL
