@@ -7,7 +7,7 @@ import {
   saveReminder, listReminders, markReminderDone,
   logWorkout, getRecentWorkouts,
   logFinance, getFinanceSummary,
-  getMemoryFacts,
+  getPromptFacts, getRules, saveRule,
   getMeetingNotes, getPendingActionItems, completeActionItem,
 } from '@/lib/supabase';
 import { parseReminderTime } from '@/lib/timeparser';
@@ -18,7 +18,8 @@ import { listRecentEmails, getEmail, listLabels, fetchMessageSummaries } from '@
 import { searchDrive, readDriveFile } from '@/lib/drive';
 import { historyForModel, gmailLookupIntent, isPlaceholderReply, calendarReadIntent } from '@/lib/chatContext';
 import { selectTools } from '@/lib/toolRouting';
-import { analysisIntent, GROUNDABLE, GROUNDED_SYSTEM, groundedUser, needsLookIds, driveReadableIds } from '@/lib/grounded';
+import { analysisIntent, GROUNDABLE, GROUNDED_SYSTEM, groundedUser, needsLookIds, driveReadableIds, inboxTopic } from '@/lib/grounded';
+import { parseStandingInstruction, ruleSavedReply, rulesBlock } from '@/lib/instructions';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { parseReplyIntent, handleReply } from '@/lib/replyIntent';
 import { ticketWriteIntent, mailWriteIntent } from '@/lib/routingGuards';
@@ -728,8 +729,9 @@ export async function POST(req: NextRequest) {
   // this message could be answering that — otherwise every casual message (most of them)
   // would pay for an unnecessary Freshdesk API call just to build a list it'll never use.
   const mightBeTicketQuestion = /\bticket(s)?\b|\bbucket\b|\bqueue\b/i.test(message);
-  const [memoryFacts, agentNameTokens] = await Promise.all([
-    getMemoryFacts(userId, 20),
+  const [memoryFacts, rules, agentNameTokens] = await Promise.all([
+    getPromptFacts(userId, 20),
+    getRules(userId),
     (mightBeTicketQuestion || awaitingAgentDisambiguationPrompt) ? getAgentNameTokens() : Promise.resolve([] as string[]),
   ]);
 
@@ -877,6 +879,10 @@ export async function POST(req: NextRequest) {
   const forcedName = typeof forcedToolChoice === 'object' ? forcedToolChoice.function.name : undefined;
   const recent = history.slice(-4).map(h => h.content.slice(0, 300));
   const turnTools = selectTools(TOOLS, message, recent, forcedName);
+  const ruleTexts = rules.map(r => r.fact);
+  // "What about jobs?" then "In my inbox": the question is about job emails, not the whole inbox.
+  const prevUser = [...history].slice(-2).reverse().find(h => h.role === 'user')?.content;
+  const topic = inboxCheckMatch && !analysisIntent(message) ? inboxTopic(message, prevUser) : null;
 
   await appendConversation(userId, 'user', message);
 
@@ -886,24 +892,62 @@ export async function POST(req: NextRequest) {
 
   const readable = new ReadableStream({
     start(controller) {
-      const emit = (text: string) => controller.enqueue(sseChunk(text));
-      const close = () => { controller.enqueue(sseDone()); controller.close(); };
+      // Every turn must end with a reply that is shown AND saved. On 2026-11-10 several messages ("Be polite",
+      // "Hey Maya") got neither: the turn never reached a save. `settled` makes the first ending win; the
+      // deadline below ends the turn itself before Vercel's 60s limit kills the function silently.
+      let settled = false;
+      const path: string[] = [];
+      const send = (bytes: Uint8Array) => { if (settled) return; try { controller.enqueue(bytes); } catch { /* client left; keep going so the reply is still saved */ } };
+      const emit = (text: string) => send(sseChunk(text));
+      const saveReply = async (text: string) => {
+        if (settled) return;
+        await appendConversation(userId, 'assistant', text).catch(e => console.error('[chat] reply not saved:', (e as Error).message));
+      };
+      const close = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        console.log(`[chat] done ms=${Date.now() - startedAt} path=${path.join('>') || 'direct'}`);
+        try { controller.enqueue(sseDone()); controller.close(); } catch { /* client left */ }
+      };
+      const deadline = setTimeout(() => {
+        if (settled) return;
+        console.error(`[chat] turn hit the deadline ms=${Date.now() - startedAt} path=${path.join('>')}`);
+        const msg = 'Sorry, Manoj, that took too long and I had to stop. Please ask again.';
+        appendConversation(userId, 'assistant', msg).catch(e => console.error('[chat] reply not saved:', (e as Error).message));
+        emit(msg);
+        close();
+      }, 52000);
 
       const finish = async (reply: string) => {
         let r = reply.trim();
         r = r.replace(/^(.{4,}?)\s*\1$/s, '$1').trim();
-        if (!r) r = 'Something went wrong on my end. Try again.';
-        await appendConversation(userId, 'assistant', r).catch(() => {});
+        if (!r) r = 'Sorry, Manoj, something went wrong on my end. Please try again.';
+        await saveReply(r);
         emit(r);
         close();
       };
 
       // Top-level net: any unhandled throw settles the controller so the stream is never leaked
       (async () => {
+        // "Be polite", "from now on reply in Hindi": a standing rule. Saved for every later turn, then confirmed.
+        const standing = parseStandingInstruction(message);
+        if (standing) {
+          path.push('rule');
+          try {
+            await saveRule(userId, standing.rule, standing.kind === 'fact' ? 'preference' : 'instruction');
+            await finish(ruleSavedReply(standing));
+          } catch (e) {
+            console.error('[chat] rule save failed:', (e as Error).message);
+            await finish("Sorry, Manoj, I couldn't save that rule just now. Please say it again in a moment.");
+          }
+          return;
+        }
+
         // "reply to Bob saying yes": looked up and queued for approval without the model (see replyIntent.ts).
         const replyIntent = parseReplyIntent(message);
         if (replyIntent) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ tool: 'send_email', phase: 'start' })}\n\n`));
+          send(encoder.encode(`data: ${JSON.stringify({ tool: 'send_email', phase: 'start' })}\n\n`));
           let text: string;
           let queued: { to: string; subject: string; body: string } | undefined;
           try {
@@ -915,7 +959,7 @@ export async function POST(req: NextRequest) {
             console.error('reply handler failed:', (e as Error).message);
             text = 'Could not set that reply up. Nothing was queued.';
           }
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          send(encoder.encode(`data: ${JSON.stringify({
             tool: 'send_email', phase: 'end', ok: !!queued,
             ...(evalUser ? { args: JSON.stringify(queued ?? {}), result: text.slice(0, 700) } : {}),
           })}\n\n`));
@@ -933,7 +977,7 @@ export async function POST(req: NextRequest) {
           response = await wf(model => groq.chat.completions.create({
             ...fallbackOpts(model),
             model,
-            messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
+            messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts, ruleTexts) }, ...msgs],
             tools: turnTools,
             tool_choice: forcedToolChoice,
             max_tokens: model === PRIMARY_MODEL ? 400 : 700, // the fallback spends some tokens reasoning first
@@ -953,7 +997,7 @@ export async function POST(req: NextRequest) {
             response = await wf(model => groq.chat.completions.create({
               ...fallbackOpts(model),
               model,
-              messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
+              messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts, ruleTexts) }, ...msgs],
               tools: TOOLS,
               tool_choice: 'auto',
               max_tokens: model === PRIMARY_MODEL ? 400 : 700,
@@ -973,9 +1017,12 @@ export async function POST(req: NextRequest) {
           const queuedNotes: string[] = []; // gated-tool queue text, appended verbatim in mixed turns
 
           for (const tc of toolCalls) {
+            // The deadline already answered: running more tools now would repeat them when Manoj asks again.
+            if (settled) return;
             let result: string;
+            path.push(tc.function.name);
             // Progress event so the UI can show "Checking Gmail…". Unknown keys are ignored by older clients.
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ tool: tc.function.name, phase: 'start' })}\n\n`));
+            send(encoder.encode(`data: ${JSON.stringify({ tool: tc.function.name, phase: 'start' })}\n\n`));
             try {
               const targs = JSON.parse(tc.function.arguments) as Record<string, unknown>;
               // The model sometimes truncates an id it was handed ("1a10115c…" became "1a"). An id the user
@@ -984,11 +1031,16 @@ export async function POST(req: NextRequest) {
                 const typed = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{10,}\b/i.exec(message)?.[0];
                 if (typed && targs.message_id !== typed) targs.message_id = typed;
               }
+              // A topic question needs recent mail, read or not; the model's default "is:unread" would miss most of it.
+              if (tc.function.name === 'list_emails' && topic && (!targs.query || targs.query === 'is:unread')) {
+                targs.query = 'newer_than:14d';
+                targs.max_results = Math.max(Number(targs.max_results) || 0, 25);
+              }
               result = await executeTool(tc.function.name, targs, userId);
             } catch (e) {
               result = `Tool error: ${(e as Error).message}`;
             }
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            send(encoder.encode(`data: ${JSON.stringify({
               tool: tc.function.name, phase: 'end', ok: !result.startsWith('Tool error'),
               // Arguments and a result excerpt are exposed to eval runs only.
               ...(evalUser ? { args: tc.function.arguments, result: result.slice(0, 700) } : {}),
@@ -999,7 +1051,8 @@ export async function POST(req: NextRequest) {
           }
 
           // "Summarise / read through / prioritise" over read-only tool data: answer from the data alone.
-          if (analysisIntent(message) && toolCalls.length > 0 && toolCalls.every(tc => GROUNDABLE.has(tc.function.name)) && !toolResults.some(t => String(t.content).startsWith('Tool error'))) {
+          const topicOnly = !!topic && toolCalls.length > 0 && toolCalls.every(tc => tc.function.name === 'list_emails');
+          if ((analysisIntent(message) || topicOnly) && toolCalls.length > 0 && toolCalls.every(tc => GROUNDABLE.has(tc.function.name)) && !toolResults.some(t => String(t.content).startsWith('Tool error'))) {
             try {
               // Each section has its own cap so appended bodies / file text are never silently cut off.
               const listed = toolResults.map(t => String(t.content)).join('\n\n');
@@ -1017,13 +1070,13 @@ export async function POST(req: NextRequest) {
               const g = await wf(model => groq.chat.completions.create({
                 ...fallbackOpts(model),
                 model,
-                messages: [{ role: 'system', content: GROUNDED_SYSTEM }, { role: 'user', content: groundedUser(message, data) }],
+                messages: [{ role: 'system', content: [GROUNDED_SYSTEM, rulesBlock(ruleTexts)].filter(Boolean).join('\n\n') }, { role: 'user', content: groundedUser(topicOnly ? `${message} (he wants only the emails about: ${topic})` : message, data) }],
                 temperature: 0.2,
                 max_tokens: model === PRIMARY_MODEL ? 450 : 800,
               }));
               const summary = (g.choices[0]?.message?.content ?? '').trim();
               if (summary) {
-                await appendConversation(userId, 'assistant', summary).catch(() => {});
+                await saveReply(summary);
                 emit(summary);
                 close();
                 return;
@@ -1038,7 +1091,7 @@ export async function POST(req: NextRequest) {
             // '\n\n' not ' ' — several entries in this set (ticket/email lookups) are multi-line
             // formatted blocks, not one-line confirmations; joining with a space would mash them together.
             const reply = fastResults.join('\n\n');
-            await appendConversation(userId, 'assistant', reply).catch(() => {});
+            await saveReply(reply);
             emit(reply);
             close();
             return;
@@ -1054,7 +1107,7 @@ export async function POST(req: NextRequest) {
             const groqStream = await wf(model => groq.chat.completions.create({
               ...fallbackOpts(model),
               model,
-              messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts) }, ...msgs],
+              messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts, ruleTexts) }, ...msgs],
               tools: turnTools,
               tool_choice: 'auto',
               max_tokens: model === PRIMARY_MODEL ? 600 : 900,
@@ -1067,7 +1120,7 @@ export async function POST(req: NextRequest) {
               const text = chunk.choices[0]?.delta?.content ?? '';
               if (text) {
                 fullReply += text;
-                controller.enqueue(sseChunk(text));
+                emit(text);
                 chunksEmitted++;
               }
             }
@@ -1078,11 +1131,11 @@ export async function POST(req: NextRequest) {
             if (queuedNotes.length) {
               const tail = `\n\n${queuedNotes.join('\n')}`;
               fullReply += tail;
-              controller.enqueue(sseChunk(tail));
+              emit(tail);
               chunksEmitted++;
             }
             if (!fullReply) fullReply = 'Something went wrong on my end. Try again.';
-            await appendConversation(userId, 'assistant', fullReply).catch(() => {});
+            await saveReply(fullReply);
             if (chunksEmitted === 0) emit(fullReply); // nothing streamed yet, emit now
             close();
             return;
@@ -1091,7 +1144,7 @@ export async function POST(req: NextRequest) {
             const errMsg = queuedNotes.length
               ? `Queued, not done yet. ${queuedNotes.join('\n')}`
               : 'Done, but had trouble composing the response. Try asking again.';
-            await appendConversation(userId, 'assistant', errMsg).catch(() => {});
+            await saveReply(errMsg);
             emit(errMsg);
             close();
             return;
@@ -1101,9 +1154,9 @@ export async function POST(req: NextRequest) {
         // No tools: direct answer already in response
         const reply = response.choices[0]?.message?.content ?? '';
         await finish(reply);
-      })().catch(e => {
-        console.error('ReadableStream start() unhandled:', (e as Error).message);
-        try { controller.error(e); } catch { /* already closed */ }
+      })().catch(async e => {
+        console.error('[chat] unhandled:', (e as Error).message, 'path=' + path.join('>'));
+        await finish('Sorry, Manoj, something went wrong on my end. Please try again.');
       });
     },
   });

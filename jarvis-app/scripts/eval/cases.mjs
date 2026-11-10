@@ -15,6 +15,16 @@ export const CASES = [
   { id: 'chat-ok', msg: 'ok', noTools: true, maxWords: 15 },
   { id: 'chat-ambiguous', msg: 'do it', noTools: true, maxWords: 30, avoid: [/^\s*(done|sent|saved)\b/i] },
 
+  // ── standing rules and politeness (2026-11-10: "Be polite" / "Remember to be polite. I am your boss" never stuck)
+  { id: 'rule-polite', msg: 'Remember to be polite. I am your boss', noTools: true, match: [/from now on/i, /polite/i] },
+  { id: 'rule-be-polite', msg: 'Be polite', noTools: true, match: [/from now on/i] },
+  { id: 'rule-persists', pre: ['from now on, end every reply with the word Boss'], msg: "what's 12 x 12", noTools: true, match: [/144/, /boss[.!]?\s*$/i] },
+  { id: 'rule-not-reminder', msg: 'remember to call mom at 6pm', tools: ['set_reminder'], avoid: [/from now on/i] },
+  { id: 'chat-hey-maya', msg: 'Hey Maya', noTools: true, maxWords: 20, avoid: [...BANNED, /^\s*$/, /what do you need\?/i] },
+  // ── email topic questions answer the question, not dump the inbox
+  { id: 'mail-topic', msg: 'What about jobs in my inbox?', tools: ['list_emails'], avoid: [/^\[(automated|needs-look)\]\s+\[[a-z0-9]{10,}\]/m] },
+  { id: 'mail-topic-followup', pre: ['What about jobs?'], msg: 'In my inbox', tools: ['list_emails'], avoid: [/^\[(automated|needs-look)\]\s+\[[a-z0-9]{10,}\]/m] },
+
   // ── email (read)
   { id: 'mail-unread', msg: 'any unread email?', tools: ['list_emails'], avoid: [/\(older email list omitted\)/] },
   { id: 'mail-gmail', msg: 'I connected my gmail account', tools: ['list_emails'] },

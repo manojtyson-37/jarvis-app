@@ -79,4 +79,7 @@ const veto = (set: ReturnType<typeof make>, message: string, needsOpener = false
 const TICKET_REF = /\bticket\s*#?\s*\d{4,}|#\d{4,}|^\s*\d{4,}\s*[?!.]*\s*$/i;
 export const ticketWriteIntent = (message: string): boolean => veto(T, message, TICKET_REF.test(message));
 // "send me the inbox summary" asks for a read, not for mail to go anywhere.
-export const mailWriteIntent = (message: string): boolean => veto(M, message.replace(/\bsend me\b/gi, 'give me'));
+// "What about jobs in my inbox?" opens with a request frame but asks a question; read it as one. Any write word still
+// counts as before ("how about replying to Bob" stays a write). Only this opener changes; the rest is the original guard.
+export const mailWriteIntent = (message: string): boolean =>
+  veto(M, message.replace(/\bsend me\b/gi, 'give me').replace(/^\s*(?:what|how) about\b/i, 'what is'));

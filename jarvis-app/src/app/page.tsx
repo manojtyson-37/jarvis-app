@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import RichMessage from '@/components/RichMessage';
+import RulesPanel from '@/components/RulesPanel';
 import { TOOL_LABELS } from '@/lib/toolLabels';
 import { ChatIcon, NoteIcon, BellIcon, ActivityIcon, MicIcon, SendIcon, XIcon, CheckIcon, LogOutIcon, WaveIcon, MailIcon, CalendarIcon, SparkIcon, TrashIcon, RefreshIcon, ShieldIcon } from '@/components/icons';
 
@@ -707,6 +708,7 @@ export default function MayaPage() {
             <div className="h-full overflow-y-auto">
               <div className="mx-auto w-full max-w-3xl px-4 py-6">
                 <PageHeader title="Notes" count={notes.length} onRefresh={loadDashboard} />
+                <RulesPanel />
                 {dashLoading ? (
                   <p className="text-sm text-zinc-400 text-center mt-20" role="status">Loading…</p>
                 ) : notes.length === 0 ? (

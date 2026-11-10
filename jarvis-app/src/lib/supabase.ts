@@ -1,4 +1,6 @@
+import 'server-only';
 import { createClient } from '@supabase/supabase-js';
+import { ruleKey } from '@/lib/instructions';
 
 // Server-only client. Every importer is a server route or lib, so it uses the
 // service-role key, which bypasses RLS. RLS is enabled with no policies on every
@@ -206,6 +208,69 @@ export async function getMemoryFacts(userId: string, limit = 40) {
     .order('updated_at', { ascending: false }).limit(limit);
   if (error) console.error('getMemoryFacts error:', error.message);
   return data ?? [];
+}
+
+// Facts for the chat prompt. "question" rows are a log of what Maya already asked (question.ts dedupes with them),
+// "instruction" rows are standing rules with their own prompt block, and "ticket"/"email" rows were one-off lookups
+// the nightly job wrongly kept as facts (a ticket's status, a test email). None of them belongs in this list.
+export async function getPromptFacts(userId: string, limit = 20) {
+  const { data, error } = await supabase
+    .from('maya_memory').select('fact, category')
+    .eq('user_id', userId).eq('active', true)
+    .not('category', 'in', '("question","instruction","ticket","email")')
+    .order('updated_at', { ascending: false }).limit(limit);
+  if (error) console.error('getPromptFacts error:', error.message);
+  return data ?? [];
+}
+
+// ── Standing rules (maya_memory rows with category "instruction") ─────────
+export type Rule = { id: string; fact: string; updated_at: string };
+
+export async function getRules(userId: string): Promise<Rule[]> {
+  const { data, error } = await supabase
+    .from('maya_memory').select('id, fact, updated_at')
+    .eq('user_id', userId).eq('category', 'instruction').eq('active', true)
+    .order('updated_at', { ascending: true }).limit(50);
+  if (error) console.error('getRules error:', error.message);
+  return (data ?? []) as Rule[];
+}
+
+// Saves a rule (or a remembered fact) unless the same text is already active. Returns true when a row was added.
+export async function saveRule(userId: string, text: string, category: 'instruction' | 'preference' = 'instruction'): Promise<boolean> {
+  const t = text.trim().slice(0, 300);
+  if (!t) return false;
+  const { data, error } = await supabase
+    .from('maya_memory').select('id, fact, active').eq('user_id', userId).eq('category', category).limit(500);
+  if (error) throw error;
+  const same = (data ?? []).filter((r: { fact: string }) => ruleKey(r.fact) === ruleKey(t));
+  if (same.some((r: { active: boolean }) => r.active)) return false;
+  // Said again after being removed: switch the old row back on instead of adding a duplicate.
+  if (same.length) {
+    const { error: e1 } = await supabase.from('maya_memory')
+      .update({ active: true, updated_at: new Date().toISOString() }).eq('id', same[0].id).eq('user_id', userId);
+    if (e1) throw e1;
+    return true;
+  }
+  const { error: e2 } = await supabase.from('maya_memory').insert({ user_id: userId, fact: t, category });
+  if (e2) throw e2;
+  return true;
+}
+
+export async function updateRule(userId: string, id: string, text: string) {
+  const t = text.trim().slice(0, 300);
+  if (!t) throw new Error('Rule text is empty');
+  const { error } = await supabase.from('maya_memory')
+    .update({ fact: t, updated_at: new Date().toISOString() })
+    .eq('id', id).eq('user_id', userId).eq('category', 'instruction');
+  if (error) throw error;
+}
+
+// Switches a rule off instead of deleting the row, so a removal can be undone.
+export async function deactivateRule(userId: string, id: string) {
+  const { error } = await supabase.from('maya_memory')
+    .update({ active: false, updated_at: new Date().toISOString() })
+    .eq('id', id).eq('user_id', userId).eq('category', 'instruction');
+  if (error) throw error;
 }
 
 // ── Evolution Log ──────────────────────────────────────────────────────────

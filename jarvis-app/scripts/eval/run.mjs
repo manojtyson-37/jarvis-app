@@ -58,6 +58,8 @@ for (const [i, c] of todo.entries()) {
   // Free-tier Groq limits tokens per minute: when the reply is the rate-limit message, wait and retry (up to 3x).
   let r;
   for (let attempt = 0; attempt < 4; attempt++) {
+    // Multi-turn cases: earlier messages from the same throwaway user (a rule, a question being followed up).
+    if (attempt === 0) for (const p of c.pre ?? []) await ask(cookie, user, p);
     try { r = await ask(cookie, user, c.msg); } catch (e) { r = { reply: `exception: ${e.message}`, toolCalls: [], ms: 0, error: true }; }
     if (!/rate limit for the moment|Hit a snag/.test(r.reply) || attempt === 3) break;
     await new Promise(res => setTimeout(res, 40000));
