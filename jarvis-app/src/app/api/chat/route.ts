@@ -24,6 +24,8 @@ import { parseStandingInstruction, ruleSavedReply, rulesBlock } from '@/lib/inst
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { parseReplyIntent, handleReply } from '@/lib/replyIntent';
 import { ticketWriteIntent, mailWriteIntent } from '@/lib/routingGuards';
+import { parseAwayIntent } from '@/lib/away/intent';
+import { handleAwayIntent } from '@/lib/away/chat';
 import { getGoogleAccessToken } from '@/lib/google';
 
 // Retries are handled here, not in the SDK: a daily-quota 429 carries a wait of many minutes, so the SDK would burn
@@ -967,6 +969,22 @@ export async function POST(req: NextRequest) {
           return;
         }
 
+        // "I'm away until Friday", "send draft 2", "FAQ: ...": Away Mode commands, handled without the model. Starting an
+        // agent that answers email for him is matched strictly (away/intent.ts) and never inferred from a casual sentence.
+        const awayIntent = parseAwayIntent(message);
+        if (awayIntent) {
+          path.push('away');
+          let text: string;
+          try {
+            text = await handleAwayIntent(awayIntent, userId);
+          } catch (e) {
+            console.error('[chat] away command failed:', (e as Error).message);
+            text = 'Could not do that just now, and nothing was changed. Please try again in a moment.';
+          }
+          await finish(text);
+          return;
+        }
+
         const msgs: Groq.Chat.ChatCompletionMessageParam[] = [
           ...historyForModel(history),
           { role: 'user', content: message },
@@ -1021,7 +1039,7 @@ export async function POST(req: NextRequest) {
           // tool picked, forced or not, since his question may not mention the inbox at all. A plain check falls through
           // to the usual list; so does any Gmail or answer failure, rather than a guess.
           let topicStartSent = false;
-          if (turns === 1 && toolCalls.length === 1 && toolCalls[0].function.name === 'list_emails' && !analysisIntent(message)) {
+          if (turns === 1 && toolCalls.length === 1 && toolCalls[0].function.name === 'list_emails' && !analysisIntent(message) && !mailWriteIntent(message)) {
             path.push('inbox-topic');
             topicStartSent = true;
             send(encoder.encode(`data: ${JSON.stringify({ tool: 'list_emails', phase: 'start' })}\n\n`));

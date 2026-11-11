@@ -5,6 +5,7 @@
 // Whether a question has a subject is decided by the model, not by counting or pattern-matching his words; the only
 // deterministic step is skipping that call when nothing but filler words is left ("check my inbox").
 import { inboxSubjectWords } from './grounded';
+import { mapLimit } from './concurrency';
 import type { EmailSummary } from './gmail';
 
 export type Llm = (system: string, user: string, maxTokens: number) => Promise<string>;
@@ -45,7 +46,14 @@ export function sanitizeQuery(q: string): string | null {
   // Cut at a space, never mid-term: a half-cut exclusion ("-s") silently changes what Gmail matches.
   if (one.length > 600) one = one.slice(0, 600).replace(/\s+\S*$/, '');
   if (!one || !/[a-z0-9]/i.test(one)) return null;
-  return `${one} newer_than:${SEARCH_DAYS}d`;
+  // Parenthesised so a model-written "a OR b" cannot swallow the date window into one OR branch.
+  return `(${one}) newer_than:${SEARCH_DAYS}d`;
+}
+
+// "in my inbox", "and in gmail?": a bare follow-up that carries no subject of its own and means "same question, but in
+// email". Anything else without subject words ("check my inbox please") is a plain inbox check, never a borrowed topic.
+export function isBareFollowUp(message: string): boolean {
+  return /^\s*(?:and\s+|what about\s+|how about\s+)?(?:in|on|from|inside)\s+(?:my\s+|the\s+)?(?:inbox|gmail|e-?mails?|mail)\s*\??\s*$/i.test(message);
 }
 
 export interface SearchPlan { subject: string; query: string }
@@ -68,9 +76,10 @@ export function parsePlan(raw: string): SearchPlan | null | undefined {
 
 // Used only when the planning call fails: search for any of his remaining words.
 export function fallbackPlan(message: string, previousUserMessage?: string): SearchPlan | null {
-  const words = inboxSubjectWords(message).length ? inboxSubjectWords(message) : inboxSubjectWords(previousUserMessage ?? '');
+  const own = inboxSubjectWords(message);
+  const words = own.length ? own : isBareFollowUp(message) ? inboxSubjectWords(previousUserMessage ?? '') : [];
   if (!words.length) return null;
-  const query = sanitizeQuery(`(${words.map(w => w.replace(/[^a-z0-9@.-]/gi, '')).filter(Boolean).join(' OR ')})`);
+  const query = sanitizeQuery(words.map(w => w.replace(/[^a-z0-9@.-]/gi, '')).filter(Boolean).join(' OR '));
   return query ? { subject: words.join(' '), query } : null;
 }
 
@@ -125,16 +134,6 @@ export interface TopicDeps {
   search: (query: string, max: number) => Promise<EmailSummary[] | null>;
   read: (id: string) => Promise<string>;
   rules?: string; // his standing rules (tone, language), appended to the answer prompt
-}
-
-// Gmail allows only so many parallel calls per user; past that it answers 429 and the body is lost.
-async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) { const i = next++; out[i] = await fn(items[i]); }
-  }));
-  return out;
 }
 
 export type TopicResult = { kind: 'plain' } | { kind: 'answer'; text: string; query: string; matched: number };

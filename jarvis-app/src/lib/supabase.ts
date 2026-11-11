@@ -218,7 +218,7 @@ export async function getPromptFacts(userId: string, limit = 20) {
   const { data, error } = await supabase
     .from('maya_memory').select('fact, category')
     .eq('user_id', userId).eq('active', true)
-    .not('category', 'in', '("question","instruction","ticket","email")')
+    .not('category', 'in', '("question","instruction","ticket","email","faq")')
     .order('updated_at', { ascending: false }).limit(limit);
   if (error) console.error('getPromptFacts error:', error.message);
   return data ?? [];

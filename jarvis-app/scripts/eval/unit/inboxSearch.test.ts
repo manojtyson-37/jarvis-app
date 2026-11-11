@@ -57,11 +57,11 @@ function deps(plan: string, answer = 'Rejected: Product Manager at Acme (Catheri
   { const d: TopicDeps = { llm: async () => { throw new Error('503'); }, search: async () => [], read: async () => '' }; const r = await answerInboxTopic('any rejections from Acme?', undefined, d); ok('plan call throws → fallback search', r.kind === 'answer' && r.matched === 0); }
 
   // Query hygiene.
-  ok('query: one line, model date terms replaced', sanitizeQuery('job\nOR interview newer_than:7d after:2020/01/01') === `job OR interview newer_than:${SEARCH_DAYS}d`);
+  ok('query: one line, model date terms replaced', sanitizeQuery('job\nOR interview newer_than:7d after:2020/01/01') === `(job OR interview) newer_than:${SEARCH_DAYS}d`);
   ok('query: empty → null', sanitizeQuery('  \n ') === null && sanitizeQuery('()') === null);
-  { const q = sanitizeQuery(Array(200).fill('word').join(' OR ')) ?? ''; ok('query: length capped at a word boundary', q.length < 640 && /(?:word|OR) newer_than:90d$/.test(q)); }
+  { const q = sanitizeQuery(Array(200).fill('word').join(' OR ')) ?? ''; ok('query: length capped at a word boundary', q.length < 640 && /(?:word|OR)\) newer_than:90d$/.test(q)); }
   ok('plan: nulls → no subject', parsePlan('{"subject":null,"query":null}') === null);
-  ok('plan: JSON inside prose', parsePlan('Here: {"subject":"hdfc","query":"hdfc"} ok')?.query === `hdfc newer_than:${SEARCH_DAYS}d`);
+  ok('plan: JSON inside prose', parsePlan('Here: {"subject":"hdfc","query":"hdfc"} ok')?.query === `(hdfc) newer_than:${SEARCH_DAYS}d`);
   ok('plan: garbage → undefined', parsePlan('nope') === undefined && parsePlan('{"query": 5}') === undefined);
   ok('fallback: filler only → null', fallbackPlan('check my inbox') === null);
   ok('prompt: question is quoted and capped', planUser('x'.repeat(500)).length < 330);
@@ -69,6 +69,18 @@ function deps(plan: string, answer = 'Rejected: Product Manager at Acme (Catheri
   // Email text: the update must survive cleanup and stay attached to its own email.
   ok('html → visible text, no markup or padding', htmlToText('<html><head><style>p{x}</style></head><body><p>Hi&nbsp;Manoj&middot;</p>\u034f\u034f<div>Unfortunately, we will not be moving forward</div><!-- c --></body></html>') === 'Hi Manoj·\nUnfortunately, we will not be moving forward');
   ok('html numeric entities', htmlToText('&#39;a&#x2019;') === "'a’");
+  // Review of b4ace14: any sender controls this HTML, so hostile markup must never stall the event loop.
+  for (const [name, evil] of [['bare <', '<'.repeat(80_000)], ['unclosed <style', '<style'.repeat(40_000)], ['unclosed <br', '<br'.repeat(60_000)], ['unclosed <!--', '<!--'.repeat(50_000)]] as const) {
+    const t0 = Date.now(); htmlToText(evil + ' Unfortunately'); ok(`html hostile (${name}) stays fast`, Date.now() - t0 < 400);
+  }
+  ok('html over 200k chars is cut, not parsed', htmlToText('a'.repeat(250_000)).length === 200_000);
+  ok('html <header is not a <head block', htmlToText('<header>Hello</header><p>World</p>').includes('Hello'));
+  ok('html unclosed <style keeps the text after it', htmlToText('<style>p{x}<p>Real text</p>').includes('Real text'));
+  ok('html uppercase blocks are dropped', htmlToText('<STYLE>p{x}</STYLE><P>Hi</P>') === 'Hi');
+  // A bare "in my inbox" follows the previous question; "check my inbox please" never borrows it.
+  ok('follow-up: "in my inbox" borrows the previous topic', fallbackPlan('in my inbox?', 'weather in bangalore')?.query.includes('weather') === true);
+  ok('follow-up: "check my inbox please" does not borrow', fallbackPlan('check my inbox please', 'weather in bangalore') === null);
+  ok('query: date window is outside the OR group', sanitizeQuery('a OR b') === `(a OR b) newer_than:${SEARCH_DAYS}d`);
   { const plain = 'Your update from Acme\nThis email was intended for Manoj\nhttps://x.com/' + 'a'.repeat(400); const html = '<p>Your update from Acme</p><p>' + 'Thank you for applying. '.repeat(10) + 'Unfortunately, we will not be moving forward.</p>'; ok('thin plain part loses to richer html', pickBodyText(plain, html).includes('Unfortunately')); }
   ok('plain part kept when html adds nothing', pickBodyText('Hello there, see you at 3.', '<p>Hello there, see you at 3.</p>') === 'Hello there, see you at 3.');
   ok('html-only email is text', pickBodyText('', '<b>Thank you for applying</b>') === 'Thank you for applying');

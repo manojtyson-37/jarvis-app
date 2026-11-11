@@ -11,7 +11,8 @@ export type FactCategory = (typeof FACT_CATEGORIES)[number];
 
 // Categories the prompt deliberately leaves out (getPromptFacts) or that mean a standing rule. A model fact tagged
 // with one of these is dropped, not renamed, so it can't slip into the prompt as "general".
-const RESERVED = ['instruction', 'question', 'ticket', 'email'];
+// "faq" is what Away Mode may say to strangers, so only Manoj's own typed "FAQ:" message may write one.
+const RESERVED = ['instruction', 'question', 'ticket', 'email', 'faq'];
 export function isReservedFactCategory(raw: unknown): boolean {
   return typeof raw === 'string' && RESERVED.includes(raw.trim().toLowerCase());
 }

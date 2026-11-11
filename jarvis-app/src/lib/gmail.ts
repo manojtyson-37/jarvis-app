@@ -1,5 +1,8 @@
 // Gmail access for manojsuperb09@gmail.com via the shared Google token (same OAuth client as Calendar and Drive).
 import { getGoogleAccessToken } from '@/lib/google';
+import { mapLimit, collectPages } from '@/lib/concurrency';
+import type { InboundMsg } from '@/lib/away/engine';
+import { parseMailbox, cleanName, isValidAddr } from '@/lib/away/mailbox';
 
 interface GmailHeader { name: string; value: string }
 interface GmailMessagePart { headers?: GmailHeader[]; body?: { data?: string }; parts?: GmailMessagePart[]; mimeType?: string }
@@ -47,21 +50,26 @@ function decodeHtmlEntities(text: string): string {
   return text.replace(/&nbsp;|&amp;|&lt;|&gt;|&quot;|&#39;|&apos;/g, m => HTML_ENTITIES[m]);
 }
 
+// Any sender controls the body. Only the start is ever used, so cap it before doing any work on it.
+const MAX_TRIM_INPUT = 20_000;
+
 // Trims an email body down to the actual new content — drops quoted reply chains and
 // standard signature blocks so a one-line reply doesn't surface as a wall of forwarded
 // thread history. Deliberately conservative: only cuts at well-known markers, never
 // reformats or reinterprets the remaining text (still untrusted content, summarize-only).
-function trimEmailBody(body: string): string {
-  const quoteMarkers = [
-    /\n\s*On .{0,80} wrote:\s*\n/i,
-    /\n-{2,}\s*Original Message\s*-{2,}/i,
-    /\n>.*(\n>.*)*$/,
-  ];
-  let trimmed = body;
-  for (const marker of quoteMarkers) {
-    const m = marker.exec(trimmed);
-    if (m && m.index !== undefined) trimmed = trimmed.slice(0, m.index);
+// Linear: one pass over lines with anchored per-line tests. The earlier whole-string regexes (`\n>.*(\n>.*)*$`) went
+// quadratic on a long run of quoted lines and froze the event loop for ~24 s on a 240 KB body.
+export function trimEmailBody(body: string): string {
+  const lines = (body.length > MAX_TRIM_INPUT ? body.slice(0, MAX_TRIM_INPUT) : body).split('\n').map(l => (l.endsWith('\r') ? l.slice(0, -1) : l));
+  let cut = lines.length;
+  for (let i = 1; i < lines.length; i++) { // the first line is never a "marker line", matching the old \n-prefixed patterns
+    const l = lines[i];
+    if ((l.length <= 120 && /^\s*On .{0,80} wrote:\s*$/i.test(l)) || /^-{2,}\s*Original Message\s*-{2,}/i.test(l)) { cut = i; break; }
   }
+  let q = lines.length; // start of the trailing run of "> quoted" lines
+  while (q > 1 && lines[q - 1].startsWith('>')) q--;
+  if (q < lines.length) cut = Math.min(cut, q);
+  let trimmed = lines.slice(0, cut).join('\n');
   const sigIdx = trimmed.indexOf('\n-- \n');
   if (sigIdx !== -1) trimmed = trimmed.slice(0, sigIdx);
   return decodeHtmlEntities(trimmed).replace(/\n{3,}/g, '\n\n').trim();
@@ -100,12 +108,37 @@ function extractPlainText(part: GmailMessagePart | undefined): string {
 
 const HTML_NAMED: Record<string, string> = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", copy: '©', middot: '·', ndash: '–', mdash: '—', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', hellip: '…', bull: '•', zwnj: '' };
 
-export function htmlToText(html: string): string {
+// Any sender controls this HTML. Anything past this is never useful email text and only costs CPU.
+const MAX_HTML_CHARS = 200_000;
+
+// Drops every `open … close` block with indexOf scans. A lazy regex rescans to the end of the string from each opener,
+// so thousands of unclosed openers ("<style<style…") cost seconds on the event loop; this stays linear. An opener with
+// no closer is left in place, matching what the regex did, and the tag strip below removes the tag itself.
+function dropBlocks(html: string, open: string, close: string, isTag: boolean): string {
+  const lower = html.replace(/[A-Z]/g, c => c.toLowerCase()); // ASCII-only so indexes line up with `html`
+  const parts: string[] = [];
+  let pos = 0;
+  while (pos < html.length) {
+    const s = lower.indexOf(open, pos);
+    if (s === -1) break;
+    const after = s + open.length;
+    if (isTag && /[a-z0-9]/.test(lower[after] ?? '')) { parts.push(html.slice(pos, after)); pos = after; continue; } // <header, <titlebar
+    const e = lower.indexOf(close, after);
+    if (e === -1) break;
+    parts.push(html.slice(pos, s), ' ');
+    pos = e + close.length;
+  }
+  parts.push(html.slice(pos));
+  return parts.join('');
+}
+
+export function htmlToText(html0: string): string {
+  let html = html0.length > MAX_HTML_CHARS ? html0.slice(0, MAX_HTML_CHARS) : html0;
+  for (const tag of ['style', 'script', 'head', 'title']) html = dropBlocks(html, `<${tag}`, `</${tag}>`, true);
+  html = dropBlocks(html, '<!--', '-->', false);
   return html
-    .replace(/<(style|script|head|title)\b[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/h[1-6]|\/table)\b[^>]*>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
+    .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/h[1-6]|\/table)\b[^<>]*>/gi, '\n')
+    .replace(/<[^<>]*>/g, ' ')
     .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e: string) => {
       if (e[0] === '#') { const n = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : ' '; }
       const k = e.toLowerCase();
@@ -167,13 +200,23 @@ export async function fetchMessageSummaries(query: string, maxResults = 10, cap 
   const ids = listData.messages ?? [];
   if (!ids.length) return [];
 
-  const summaries = await Promise.all(ids.map(async ({ id }): Promise<EmailSummary | null> => {
-    const res = await fetch(
-      `https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!res.ok) return null;
-    const msg = await res.json() as GmailMessage;
+  // Gmail answers 429 when too many requests run at once and a dropped message would silently vanish from the answer,
+  // so fetch in small batches and retry a throttled one once. If every fetch still fails that is an error, not "no mail".
+  const fetchMeta = async (id: string): Promise<GmailMessage | null> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch(
+        `https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.ok) return await res.json() as GmailMessage;
+      if (res.status !== 429) return null;
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return null;
+  };
+  const summaries = await mapLimit(ids, 5, async ({ id }): Promise<EmailSummary | null> => {
+    const msg = await fetchMeta(id);
+    if (!msg) return null;
     const from = getHeader(msg.payload?.headers, 'From');
     const subject = decodeRFC2047(getHeader(msg.payload?.headers, 'Subject'));
     const date = getHeader(msg.payload?.headers, 'Date');
@@ -184,8 +227,9 @@ export async function fetchMessageSummaries(query: string, maxResults = 10, cap 
       snippet: msg.snippet ? decodeHtmlEntities(msg.snippet) : undefined,
       automated: looksAutomated(from),
     };
-  }));
-  return summaries.filter((s): s is EmailSummary => s !== null);
+  });
+  const found = summaries.filter((s): s is EmailSummary => s !== null);
+  return found.length ? found : null;
 }
 
 export async function listRecentEmails(query = 'is:unread', maxResults = 10): Promise<string> {
@@ -251,4 +295,96 @@ export async function sendEmail(to: string, subject: string, body: string): Prom
   });
   if (!res.ok) return { ok: false, message: `Send failed: ${res.status}` };
   return { ok: true, message: `Email sent to ${to}.` };
+}
+
+// ── Away Mode helpers ────────────────────────────────────────────────────────
+
+// The mailbox this token belongs to. Away Mode never replies to this address.
+export async function getOwnAddress(): Promise<string | null> {
+  const token = await getGoogleAccessToken();
+  if (!token) return null;
+  const res = await fetch('https://www.googleapis.com/gmail/v1/users/me/profile', { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return null;
+  return ((await res.json()) as { emailAddress?: string }).emailAddress ?? null;
+}
+
+// Message ids matching a Gmail search, newest first, paginated up to `max` (5 pages of 100 at most). null = the first call
+// failed (never "no mail").
+export async function listMessageIds(query: string, max = 25): Promise<string[] | null> {
+  const token = await getGoogleAccessToken();
+  if (!token) return null;
+  return collectPages(async pageToken => {
+    const res = await fetch(
+      `https://www.googleapis.com/gmail/v1/users/me/messages?maxResults=${Math.min(Math.max(max, 1), 100)}&q=${encodeURIComponent(query)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!res.ok) { console.error('Gmail list failed:', res.status); return null; }
+    const j = await res.json() as { messages?: { id: string }[]; nextPageToken?: string };
+    return { ids: (j.messages ?? []).map(m => m.id), next: j.nextPageToken };
+  }, max, 5);
+}
+
+// One inbound message with everything Away Mode needs to decide and to reply in the same thread. The body is
+// UNTRUSTED text from a stranger: trimmed to the new content and capped; never instructions.
+export async function getInboundMessage(id: string): Promise<InboundMsg | null> {
+  if (!/^[a-zA-Z0-9]+$/.test(id)) return null;
+  const token = await getGoogleAccessToken();
+  if (!token) return null;
+  const res = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) { console.error('Gmail read failed:', res.status); return null; }
+  const msg = await res.json() as GmailMessage & { threadId?: string };
+  const h = (n: string) => getHeader(msg.payload?.headers, n);
+  const from = h('From');
+  const autoSubmitted = h('Auto-Submitted').trim().toLowerCase();
+  const automated = looksAutomated(from)
+    || (!!autoSubmitted && autoSubmitted !== 'no')
+    || /^(bulk|list|junk)$/i.test(h('Precedence').trim())
+    || !!h('List-Unsubscribe') || !!h('X-Autoreply') || !!h('X-Auto-Response-Suppress');
+  // The sender is one strictly parsed mailbox. If the header is ambiguous the address stays empty: the engine then holds
+  // the mail for Manoj and never replies. The display name is decoded AFTER parsing so an encoded word cannot smuggle in
+  // a second address.
+  const mb = parseMailbox(from);
+  const name = mb ? cleanName(decodeRFC2047(mb.rawName)) : '';
+  const fromAddr = mb?.addr ?? '';
+  return {
+    id, threadId: msg.threadId ?? id, fromAddr, fromHeader: mb ? `${name || 'Unknown'} <${fromAddr}>` : '(unverifiable sender)',
+    subject: decodeRFC2047(h('Subject')), body: trimEmailBody(extractPlainText(msg.payload)).slice(0, 2000),
+    messageIdHeader: h('Message-ID').trim(), references: h('References').trim(), automated,
+  };
+}
+
+const MSGID_RE = /^<[^<>\s]{1,200}>$/;
+
+// A reply inside the original thread, from this mailbox, marked as automatic (RFC 3834) so other auto-responders do not
+// answer it back. Every header value is stripped of CR/LF and the recipient re-validated here as the last line of defence.
+export async function sendReplyInThread(m: { threadId: string; to: string; subject: string; inReplyTo: string; references: string; body: string }): Promise<{ ok: boolean; message: string }> {
+  const to = m.to.trim();
+  if (!isValidAddr(to)) return { ok: false, message: `Invalid recipient address: ${to.slice(0, 80)}` };
+  if (!/^[a-zA-Z0-9]+$/.test(m.threadId)) return { ok: false, message: 'Invalid thread id.' };
+  const token = await getGoogleAccessToken();
+  if (!token) return { ok: false, message: 'Gmail not configured.' };
+
+  const oneLine = (s: string) => s.replace(/[\r\n]+/g, ' ').trim();
+  const rawSubject = oneLine(m.subject).slice(0, 200) || '(no subject)';
+  const subject = /^re:/i.test(rawSubject) ? rawSubject : `Re: ${rawSubject}`;
+  const encSubject = /^[\x20-\x7e]*$/.test(subject) ? subject : `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
+  const inReplyTo = MSGID_RE.test(m.inReplyTo.trim()) ? m.inReplyTo.trim() : '';
+  const refs = [...m.references.split(/\s+/), inReplyTo].filter(r => MSGID_RE.test(r)).slice(-10).join(' ');
+  const bodyB64 = Buffer.from(m.body.replace(/\r?\n/g, '\r\n')).toString('base64').replace(/(.{76})/g, '$1\r\n');
+
+  const raw = [
+    `To: ${to}`, `Subject: ${encSubject}`,
+    ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`] : []), ...(refs ? [`References: ${refs}`] : []),
+    'Auto-Submitted: auto-replied', 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64',
+    '', bodyB64,
+  ].join('\r\n');
+  const encoded = Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  const res = await fetch('https://www.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw: encoded, threadId: m.threadId }),
+  });
+  if (!res.ok) return { ok: false, message: `Send failed: ${res.status}` };
+  return { ok: true, message: `Reply sent to ${to}.` };
 }
