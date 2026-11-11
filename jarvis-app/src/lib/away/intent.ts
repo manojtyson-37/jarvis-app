@@ -80,7 +80,15 @@ const START_COMMAND = /^\s*(?:please\s+)?(?:(?:turn|switch)\s+(?:on\s+)?away\s+m
 const HEDGE_LEAD = /^\s*(?:if|should|can|could|would|will|whether|what\s+if|do|does|is|are|how|why|when)\b/i;
 const HEDGE_WORD = /\b(?:if|should|can|could|would|whether|what\s+if|suppose)\b/i;
 // Reported or imperative speech: "tell John I'm away", "draft an email saying I'm away", "my wife says I'm away", or a quote.
-const REPORTING = /\b(?:say|says|said|saying|tell|tells|told|telling|draft|drafts|write|writes|wrote|writing|remind|reminds|reminder|ask|asks|asked|email|emails|message|messages|post|posts|tweet|note|notify|inform|announce|mention|text)\b|["“”‘„«]/i;
+const REPORTING = /\b(?:say|says|said|saying|tell|tells|told|telling|draft|drafts|write|writes|wrote|writing|remind|reminds|reminder|ask|asks|asked|email|emails|message|messages|post|posts|tweet|note|notify|inform|announce|mention|text|quote|quotes|quoted|quoting)\b|["“”‘„«]/i;
+// Instructions to Maya about the mailbox itself ("handle my emails while I'm away"): the word "emails" there is the thing
+// to handle, not a message being written to someone, so it is not reported speech.
+const HANDLE_MAILBOX = /\b(?:handle|manage|check|answer|monitor|watch|cover|process|sort|(?:reply|respond)\s+to|deal\s+with|take\s+care\s+of|look\s+after)\s+(?:all\s+)?(?:of\s+)?(?:my|the)\s+(?:emails?|e-?mails?|mail|messages?|inbox)\b/gi;
+// Negations and someone else doing the handling ("don't handle my emails", "my assistant will handle...", "I want Maya to
+// ..."): not an instruction to start. Checked after the mailbox phrase itself is stripped.
+const NEGATED_OR_THIRD_PARTY = /\b(?:not|never|no|stop|stopped|without|won['’]?t|can['’]?t|cannot|don['’]?t|doesn['’]?t|didn['’]?t|isn['’]?t|aren['’]?t|will|would|shall|going\s+to|gonna|to|assistant|wife|husband|boss|team|colleague|partner|he|she|they|someone|nobody|no\s+one)\b|n['’]t\b/i;
+// A negation aimed at replying or the mailbox anywhere in the message ("I'm away until Friday, don't reply to my emails").
+const NEGATED_REPLY = /\b(?:not|never|no|stop|without|don['’]?t|do\s+not|doesn['’]?t|won['’]?t)\b[^.!?\n]{0,40}\b(?:repl\w*|respon\w*|answer\w*|handl\w*|emails?|mail|inbox|auto)/i;
 const LEAVE_IN_CHARGE = /\bleave\s+(?:maya|you)\s+in\s+charge\b/i;
 
 export function parseAwayIntent(message: string, now: Date = new Date()): AwayIntent | null {
@@ -113,7 +121,7 @@ export function parseAwayIntent(message: string, now: Date = new Date()): AwayIn
   const command = START_COMMAND.test(t) || (lic !== null && parseRange(t, now) !== null);
   const anchor = fp?.index ?? lic?.index ?? 0; // everything before the statement itself
   const before = t.slice(0, anchor);
-  const hedged = /\?/.test(t) || HEDGE_LEAD.test(t) || HEDGE_WORD.test(before) || REPORTING.test(before);
+  const hedged = /\?/.test(t) || NEGATED_REPLY.test(t) || HEDGE_LEAD.test(t) || HEDGE_WORD.test(before) || (() => { const rest = before.replace(HANDLE_MAILBOX, ' '); return REPORTING.test(rest) || (rest !== before && NEGATED_OR_THIRD_PARTY.test(rest)); })();
   const range = parseRange(t, now);
   const starts = !hedged && (!range || !('past' in range)) && (command || (fp !== null && range !== null));
   if (!starts) {

@@ -31,8 +31,8 @@ export interface AwayDeps {
   rules: () => Promise<EscalationRule[]>;
   knowledge: (msg: InboundMsg) => Promise<string>;
   // The ONLY text a reply may take links, addresses, phone numbers and prices from: Manoj's own FAQ. `knowledge` may also
-  // carry past replies picked by what the inbound email says, so it is never an allowlist. Defaults to `knowledge`.
-  facts?: () => Promise<string>;
+  // carry past replies picked by what the inbound email says, so it is never an allowlist. Required: no silent fallback to `knowledge`.
+  facts: () => Promise<string>;
   llm: (system: string, user: string, maxTokens: number) => Promise<string>;
   sendReply: (msg: InboundMsg, body: string) => Promise<{ ok: boolean; message: string }>;
   notifyNow: (title: string, body: string, tag: string) => Promise<void>;
@@ -73,7 +73,7 @@ export async function runAway(userId: string, deps: AwayDeps, opts: { maxMessage
   const session = await deps.getActiveSession(userId);
   if (!session) return { ...res, skipped: 'no active away session' };
   const now = deps.now();
-  if (now.getTime() >= session.endsAt.getTime()) {
+  if (!(now.getTime() < session.endsAt.getTime())) { // fails closed: an unreadable end date ends the trip
     await deps.endSession(session.id, 'ended');
     return { ...res, skipped: 'away session expired' };
   }
@@ -133,7 +133,7 @@ export async function runAway(userId: string, deps: AwayDeps, opts: { maxMessage
           console.error('[away] triage failed:', (e as Error).message);
         }
         const hit = matchEscalationRules(rules, { from: msg.fromHeader, subject: msg.subject, body: msg.body, category: triage?.category });
-        outcome = decide({ ...gate, ruleHit: hit, triage, shadowActive, replyOk: !!triage && replySafe(triage.reply, deps.facts ? await deps.facts() : knowledge) });
+        outcome = decide({ ...gate, ruleHit: hit, triage, shadowActive, replyOk: !!triage && replySafe(triage.reply, await deps.facts()) });
         if (outcome.kind === 'auto_reply') {
           // Flood and loop guards: one automatic reply per sender per day, and a daily ceiling.
           if (deps.repliedRecently && await deps.repliedRecently(session.id, msg.fromAddr, now.getTime() - DAY_MS)) {

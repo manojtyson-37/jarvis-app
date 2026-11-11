@@ -83,11 +83,13 @@ export async function claim(session: AwaySession, messageId: string): Promise<bo
   return !!data?.length;
 }
 
-// Written right before the email is sent. From here on an unfinished row is "outcome unknown", never retried.
+// Written right before the email is sent. From here on an unfinished row is "outcome unknown", never retried. A
+// compare-and-swap on reason IS NULL: of two runs that both hold the claim (one stalled and was overtaken), only the first
+// to get here may send; the second throws and sends nothing.
 export async function markSending(sessionId: string, messageId: string): Promise<void> {
-  const { data, error } = await supabase.from('agent_actions').update({ reason: 'sending' }).eq('session_id', sessionId).eq('message_id', messageId).eq('decision', 'processing').select('id');
+  const { data, error } = await supabase.from('agent_actions').update({ reason: 'sending' }).eq('session_id', sessionId).eq('message_id', messageId).eq('decision', 'processing').is('reason', null).select('id');
   if (error) throw error;
-  if (!data?.length) throw new Error('row is no longer processing');
+  if (!data?.length) throw new Error('row is no longer processing, or another run already reached the send step');
 }
 
 // Conditional on the row still being "processing": a run that stalled and was overtaken (or already finished) cannot

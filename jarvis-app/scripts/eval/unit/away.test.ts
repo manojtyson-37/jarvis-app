@@ -3,7 +3,7 @@
 // email text never steers the agent, shadow mode never sends, and a message is only ever handled once.
 import {
   extractAmountsInr, parseAmountInr, injectionSignals, matchEscalationRules, decide, parseTriage, replySafe, replyTarget,
-  DEFAULT_THRESHOLD_INR, MAX_AWAY_DAYS, canTakeOver, STALE_CLAIM_MS, type Triage, type EscalationRule,
+  DEFAULT_THRESHOLD_INR, MAX_AWAY_DAYS, canTakeOver, normalizeText, STALE_CLAIM_MS, type Triage, type EscalationRule,
 } from '../../../src/lib/away/policy';
 import { parseMailbox, isValidAddr } from '../../../src/lib/away/mailbox';
 import { trimEmailBody } from '../../../src/lib/gmail';
@@ -117,7 +117,9 @@ const K3 = 'Pay at https://pay.mycompany.com/checkout or write to help@mycompany
 ok('lookalike: the known url', replySafe('Pay at https://pay.mycompany.com/checkout', K3));
 ok('lookalike: known url, different case', replySafe('Pay at HTTPS://PAY.MyCompany.com/checkout', K3));
 ok('lookalike: known url at a sentence end', replySafe('Pay at https://pay.mycompany.com/checkout.', K3));
-ok('lookalike: deeper path after a / boundary', replySafe('See https://pay.mycompany.com/checkout/step2', K3) && replySafe('See https://pay.mycompany.com/checkout?x=1', K3) && replySafe('See https://pay.mycompany.com/checkout#a', K3));
+ok('lookalike: deeper path after a / boundary', replySafe('See https://pay.mycompany.com/checkout/step2', K3));
+ok('lookalike: a fragment the knowledge does not contain is rejected', !replySafe('See https://pay.mycompany.com/checkout#a', K3) && !replySafe('See https://pay.mycompany.com/checkout#//evil.com', K3) && replySafe('See https://pay.mycompany.com/checkout#a', 'Pay at https://pay.mycompany.com/checkout#a'));
+ok('lookalike: a query the knowledge does not contain is rejected', !replySafe('See https://pay.mycompany.com/checkout?x=1', K3) && !replySafe('See https://pay.mycompany.com/checkout/step2?redirect=https://evil.io', K3));
 ok('lookalike: a prefix that is not at a boundary', !replySafe('See https://pay.mycompany.com/checkoutevil', K3));
 ok('lookalike: .co instead of .com url', !replySafe('Pay at https://pay.mycompany.co/checkout', K3));
 ok('lookalike: .co email', !replySafe('Write to help@mycompany.co', K3));
@@ -328,6 +330,47 @@ ok('digest: huge day is capped', formatDigest(sess, Array.from({ length: 300 }, 
   ok('digest numbering: a draft already sent is not listed again', mergeDraftsIntoRows([], all).filter(r => r.decision === 'draft').map(r => r.id).join() === 'd2,d3');
 }
 
+// ── review follow-ups (round 4) ─────────────────────────────────────────────
+{
+  const KQ = 'Pay at https://pay.mycompany.com/Checkout?plan=Gold&id=7 or see https://Kbd.Example/FAQ/Fees';
+  ok('url case: verbatim FAQ link with capitals is accepted', replySafe('Pay at https://pay.mycompany.com/Checkout?plan=Gold&id=7', KQ) && replySafe('see https://kbd.example/faq/fees', KQ) && replySafe('see https://KBD.example/FAQ/FEES', KQ));
+  ok('url query: a known query must match exactly', !replySafe('Pay at https://pay.mycompany.com/Checkout?plan=Gold&id=8', KQ) && !replySafe('Pay at https://pay.mycompany.com/Checkout?plan=Gold&id=7&x=1', KQ) && !replySafe('Pay at https://pay.mycompany.com/Checkout', KQ) && !replySafe('Pay at https://pay.mycompany.com/Checkout?id=7&plan=Gold', KQ));
+  ok('url query: bare-domain form is held to the same rule', !replySafe('see kbd.example/faq/fees?next=evil.io', KQ) && replySafe('see kbd.example/faq/fees', KQ));
+  ok('empty knowledge: arbitrary prose never auto-sends', !replySafe('We open at 10am.', '') && !replySafe('We open at 10am.', '   \n ') && !replySafe('Hello', ''));
+  ok('nonempty knowledge: plain prose still fine', replySafe('We open at 10am.', 'Hours: 10am-6pm'));
+  // digits: every decimal-digit block folds to ASCII, so the amounts are read
+  const D = (zero: number) => (n: string) => [...n].map(c => String.fromCodePoint(zero + Number(c))).join('');
+  const blocks: [string, number][] = [['adlam', 0x1e950], ['mongolian', 0x1810], ['khmer', 0x17e0], ['limbu', 0x1946], ['new tai lue', 0x19d0], ['tai tham', 0x1a80], ['balinese', 0x1b50], ['sundanese', 0x1bb0], ['lepcha', 0x1c40], ['ol chiki', 0x1c50], ['vai', 0xa620], ['saurashtra', 0xa8d0], ['kayah li', 0xa900], ['javanese', 0xa9d0], ['cham', 0xaa50], ['meetei', 0xabf0], ['brahmi', 0x11066], ['mathbold', 0x1d7ce]];
+  for (const [name, z] of blocks) ok(`digits: ${name} read as ASCII (amount over threshold)`, eq(extractAmountsInr(`₹${D(z)('90000')}`), [90000]));
+  ok('digits: every \\p{Nd} code point maps to its own digit value', (() => { let bad = 0; for (let cp = 0; cp <= 0x1ffff; cp++) { const c = String.fromCodePoint(cp); if (!/^\p{Nd}$/u.test(c)) continue; const expect = (() => { let z = cp; while (z > 0 && /^\p{Nd}$/u.test(String.fromCodePoint(z - 1))) z--; return (cp - z) % 10; })(); const n = c.normalize('NFKC'); const got = normalizeText(c); if (!(got === String(expect) || (/^\d$/.test(n) && got === n))) bad++; } return bad === 0; })());
+  ok('amount: $5 million', eq(extractAmountsInr('We can pay $5 million'), [450_000_000]));
+  ok('amount: $2.5m and $3 billion', eq(extractAmountsInr('$2.5m or $3 billion'), [225_000_000, 270_000_000_000]));
+  ok('amount: 5 million rupees', eq(extractAmountsInr('a deal worth 5 million rupees'), [5_000_000]));
+  ok('amount: 50 thousand rupees', eq(extractAmountsInr('about 50 thousand rupees'), [50_000]));
+  ok('amount: 5 million dollars / usd', eq(extractAmountsInr('5 million dollars'), [450_000_000]) && eq(extractAmountsInr('2 million USD'), [180_000_000]));
+  ok('amount: Rs 5 million and ₹50 thousand', eq(extractAmountsInr('Rs 5 million'), [5_000_000]) && eq(extractAmountsInr('₹50 thousand'), [50_000]));
+  ok('amount: 5 lakh rupees counted once', eq(extractAmountsInr('5 lakh rupees'), [500_000]));
+  ok('amount: million words without a currency are not money', eq(extractAmountsInr('5 million users, 20 thousand visits'), []));
+  ok('amount: "5 may" is not $5 m', eq(extractAmountsInr('$5 may'), [450]));
+  ok('decide: $5 million escalates now', decide({ automated: false, fromSelf: false, triage: null, textAmountsInr: extractAmountsInr('pay $5 million'), thresholdInr: DEFAULT_THRESHOLD_INR, shadowActive: false, suspicious: null, ruleHit: null, replyOk: true }).kind === 'escalate_now');
+  ok('decide: 50 thousand rupees escalates at 50k', decide({ automated: false, fromSelf: false, triage: null, textAmountsInr: extractAmountsInr('invoice of 50 thousand rupees'), thresholdInr: DEFAULT_THRESHOLD_INR, shadowActive: false, suspicious: null, ruleHit: null, replyOk: true }).kind === 'escalate_now');
+  ok('url: dot segments and encoded dots/slashes are never covered', !replySafe('See https://pay.mycompany.com/checkout/../admin', K3) && !replySafe('See https://pay.mycompany.com/checkout/%2e%2e/admin', K3) && !replySafe('See https://pay.mycompany.com/checkout/%2E%2E%2Fadmin', K3) && !replySafe('See https://pay.mycompany.com/checkout/./x', K3) && !replySafe('See https://pay.mycompany.com/checkout%2fx', K3));
+  ok('url: a fragment-routed redirect on a known host is rejected', !replySafe('See https://pay.mycompany.com/#/evil?redirect=http://evil.com', 'Pay at https://pay.mycompany.com') && !replySafe('See https://pay.mycompany.com/#//evil.com', 'Pay at https://pay.mycompany.com'));
+  ok('amount: bare m / mil units in rupees and dollars', eq(extractAmountsInr('Rs 5 m'), [5_000_000]) && eq(extractAmountsInr('₹5m'), [5_000_000]) && eq(extractAmountsInr('5m rupees'), [5_000_000]) && eq(extractAmountsInr('Rs 5 mil'), [5_000_000]) && eq(extractAmountsInr('$5 mil'), [450_000_000]));
+  ok('amount: $5 crore is converted, not read as $5', eq(extractAmountsInr('$5 crore'), [5 * 1e7 * 90]) && eq(extractAmountsInr('$2 lakh'), [2 * 1e5 * 90]));
+  { const t0 = Date.now(); const big = extractAmountsInr('₹' + '9'.repeat(100_000)); ok('amount: a huge digit run is linear time and still over any threshold', Date.now() - t0 < 1500 && big.length === 1 && big[0] >= 1e9); const t1 = Date.now(); extractAmountsInr('1'.repeat(100_000) + ' rupees'); ok('amount: long digit run before a currency word is fast', Date.now() - t1 < 1500); }
+  // intent
+  const NOW = new Date('2026-11-11T06:00:00Z');
+  const startsOk = (s: string) => parseAwayIntent(s, NOW)?.kind === 'start';
+  ok('intent: "handle my emails while I\'m away until Friday" starts', startsOk("handle my emails while I'm away until Friday") && startsOk("please manage my inbox while I'm away until Friday") && startsOk("reply to my emails, I'm away until Friday"));
+  ok('intent: quote is reported speech and never starts', !startsOk("get me a quote, I'm away until Friday") && !startsOk("send the quote saying I'm away until Friday") && !startsOk("quote him that I'm away until Friday"));
+  ok('intent: reporting verbs still block next to a handle-phrase', !startsOk("tell John to handle my emails, I'm away until Friday") && !startsOk("email John, I'm away until Friday") && !startsOk("draft an email saying I'm away until Friday"));
+  ok('intent: negated or third-party mailbox instructions never start', ["Don't handle my emails while I'm away until Friday", "never answer my emails while I'm away until Friday", "don't reply to my emails while I'm away until Friday", "no need to handle my emails while I'm away until Friday", 'My assistant will handle my emails while I\'m away until Friday', "my wife will check my inbox, I'm away until Friday", "I don't want you to handle my emails while I'm away until Friday", "stop handling my emails, I'm away until Friday", "without handling my emails I'm away until Friday"].every(x => !startsOk(x)));
+  ok('intent: a negation after the away statement never starts', ["I'm away until Friday, don't reply to my emails", "I'm away until Friday, do not auto-reply", "I'm away until Friday, no auto replies please", "I'm away until Friday. Never handle my inbox", "I'm away until Friday without answering emails"].every(x => !startsOk(x)));
+  ok('intent: start with a threshold and plain tail still works', startsOk("I'm away until Friday, escalate over ₹1 lakh") && startsOk("I'm away until Friday, handle my emails"));
+  ok('intent: plain start still works', startsOk("I'm away until Friday") && startsOk('away mode on'));
+}
+
 // ── the engine ───────────────────────────────────────────────────────────────
 const msg = (o: Partial<InboundMsg> = {}): InboundMsg => ({ id: 'm1', threadId: 't1', fromAddr: 'ann@x.com', fromHeader: 'Ann <ann@x.com>', subject: 'Office hours?', body: 'Hi, what are your office hours?', messageIdHeader: '<abc@x.com>', references: '', automated: false, ...o });
 const session = (o: Partial<AwaySession> = {}): AwaySession => ({ ...sess, shadowUntil: new Date('2026-11-11T06:30:00Z'), ...o }); // shadow already over
@@ -348,6 +391,7 @@ function world(o: { session?: AwaySession | null; msgs?: InboundMsg[]; llm?: () 
     finish: async (_s, id, patch) => { log.finished[id] = patch; },
     rules: async () => o.rules ?? [],
     knowledge: async () => 'Office hours: 10am to 6pm, Monday to Saturday.',
+    facts: async () => 'Office hours: 10am to 6pm, Monday to Saturday.',
     llm: async () => { log.llm++; return (o.llm ?? (() => GOOD_LLM))(); },
     sendReply: async (m, body) => { log.order.push('send'); log.sent.push({ to: m.fromAddr, body, threadId: m.threadId }); return o.sendOk === false ? { ok: false, message: 'Send failed: 500' } : { ok: true, message: 'sent' }; },
     notifyNow: async (title, body) => { log.notified.push(`${title} | ${body}`); },
@@ -419,6 +463,8 @@ function world(o: { session?: AwaySession | null; msgs?: InboundMsg[]; llm?: () 
   // round 3
   { const { deps, log } = world({ llm: () => JSON.stringify({ category: 'faq', confidence: 0.99, answerable: true, summary: 's', reply: 'Pay at https://old.example/pay' }) }); deps.knowledge = async () => 'FAQ: hours 10-6\nPAST REPLIES BY MANOJ: pay at https://old.example/pay'; deps.facts = async () => 'FAQ: hours 10-6'; await runAway('manoj', deps); ok('engine: a link that appears only in past replies is not allowlisted', log.sent.length === 0 && log.finished.m1.decision === 'draft'); }
   { const { deps, log } = world({ llm: () => JSON.stringify({ category: 'faq', confidence: 0.99, answerable: true, summary: 's', reply: 'See https://kbd.example/fees' }) }); deps.knowledge = async () => 'FAQ: https://kbd.example/fees'; deps.facts = async () => 'FAQ: https://kbd.example/fees'; await runAway('manoj', deps); ok('engine: a link from the FAQ still goes out', log.sent.length === 1); }
+  { const { deps, log } = world({ session: session({ endsAt: new Date(NaN) }) }); const r = await runAway('manoj', deps); ok('engine: a broken endsAt date expires the session', !!r.skipped && log.ended[0] === 'ended' && log.listed === 0 && log.sent.length === 0); }
+  { const { deps, log } = world({ llm: () => JSON.stringify({ category: 'faq', confidence: 0.99, answerable: true, summary: 's', reply: 'We open at 10am.' }) }); deps.facts = async () => ''; await runAway('manoj', deps); ok('engine: an empty FAQ never auto-sends prose', log.sent.length === 0 && log.finished.m1.decision === 'draft'); }
   { const { deps, log } = world({ session: session({ shadowUntil: new Date(NaN) }) }); await runAway('manoj', deps); ok('engine: a broken shadow date fails closed (drafts, never sends)', log.sent.length === 0 && log.finished.m1.decision === 'draft'); }
   { const { deps, log } = world({ msgs: [msg({ body: 'Need ₹9,00,000 refund' })] }); deps.finish = async () => { throw new Error('claim lost'); }; const r = await runAway('manoj', deps); ok('engine: a lost claim at finish is an error, counted nowhere, no notice', r.errors === 1 && log.notified.length === 0 && Object.keys(r.byDecision).length === 0); }
   await new Promise(r => setTimeout(r, 50));

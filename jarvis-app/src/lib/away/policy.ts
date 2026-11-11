@@ -19,14 +19,16 @@ const AUTO_OK = new Set<Category>(['faq', 'onboarding']);
 
 export type DecisionKind = 'ignore' | 'escalate_now' | 'needs_you' | 'draft' | 'auto_reply';
 
-// First code point of each non-ASCII decimal-digit block (0 to 9 follow it): Arabic-Indic, Persian, N'Ko, Devanagari,
-// Bengali, Gurmukhi, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Thai, Lao, Tibetan, Myanmar.
-const DIGIT_ZEROS = [0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66, 0xe50, 0xed0, 0xf20, 0x1040];
+// Every Unicode decimal digit (\p{Nd}) is folded to its ASCII digit. Each Nd block is a run of ten consecutive code points
+// starting at zero, so a digit's value is its distance from the start of its block: counted by walking back while the
+// previous code point is also a digit, modulo ten (adjacent blocks stay aligned to ten).
+const isNd = (cp: number) => cp >= 0 && /^\p{Nd}$/u.test(String.fromCodePoint(cp));
 function asciiDigits(t: string): string {
-  return t.replace(/[٠-٩۰-۹߀-߉०-९০-৯੦-੯૦-૯୦-୯௦-௯౦-౯೦-೯൦-൯๐-๙໐-໙༠-༩၀-၉]/g, c => {
+  return t.replace(/(?![0-9])\p{Nd}/gu, c => {
     const cp = c.codePointAt(0)!;
-    const z = DIGIT_ZEROS.find(zz => cp >= zz && cp <= zz + 9)!;
-    return String(cp - z);
+    let back = 0;
+    while (back < 100 && isNd(cp - back - 1)) back++;
+    return String(back % 10);
   }).replace(/٬/g, ',').replace(/٫/g, '.');
 }
 
@@ -38,15 +40,19 @@ export function normalizeText(t: string): string {
 }
 
 // ── money ────────────────────────────────────────────────────────────────────
-const MULT: Record<string, number> = { k: 1e3, lakh: 1e5, lakhs: 1e5, lac: 1e5, lacs: 1e5, crore: 1e7, crores: 1e7, cr: 1e7, m: 1e6 };
+const MULT: Record<string, number> = { k: 1e3, thousand: 1e3, lakh: 1e5, lakhs: 1e5, lac: 1e5, lacs: 1e5, crore: 1e7, crores: 1e7, cr: 1e7, m: 1e6, mn: 1e6, mil: 1e6, million: 1e6, bn: 1e9, billion: 1e9 };
 const num = (s: string) => parseFloat(s.replace(/,/g, ''));
 const NUM = String.raw`(\d[\d,]*(?:\.\d+)?)`;
-const IN_UNIT = String.raw`(k|lakhs?|lacs?|crores?|cr)`;
+const IN_UNIT = String.raw`(k|thousand|million|mil|mn|m|billion|bn|lakhs?|lacs?|crores?|cr)`;
+const WORD_UNIT = String.raw`(k|thousand|million|mil|mn|m|billion|bn|lakhs?|lacs?|crores?|cr)`; // before a currency word: "5 million rupees"
+const USD_UNIT = String.raw`(k|m|mn|mil|bn|thousand|million|billion|lakhs?|lacs?|crores?|cr)`;
 
 // Every currency amount in the text, in rupees, in the order they appear. A bare number is never money (phone numbers,
 // counts); an amount needs a currency sign/word, or "lakh"/"crore".
 export function extractAmountsInr(raw: string): number[] {
-  const text = normalizeText(raw);
+  // A digit run longer than any real amount is cut to 25 nines: far above every threshold, and the matching below stays
+  // linear (a hostile 100k-digit run would otherwise cost seconds).
+  const text = normalizeText(raw).replace(/[\d,]{26,}/g, '9'.repeat(25));
   const found: { at: number; end: number; inr: number }[] = [];
   const take = (re: RegExp, toInr: (m: RegExpExecArray) => number) => {
     for (const m of text.matchAll(re)) {
@@ -57,9 +63,9 @@ export function extractAmountsInr(raw: string): number[] {
     }
   };
   take(new RegExp(String.raw`(?:₹|\brs\.?|\binr\b|\brupees?|रुपये|रुपए|रु\.?)\s*${NUM}(?:\s*${IN_UNIT}\b)?`, 'gi'), m => num(m[1]) * (m[2] ? MULT[m[2].toLowerCase()] : 1));
-  take(new RegExp(String.raw`(?:\$|\busd\b)\s*${NUM}(?:\s*(k|m)\b)?`, 'gi'), m => num(m[1]) * (m[2] ? MULT[m[2].toLowerCase()] : 1) * USD_TO_INR);
-  take(new RegExp(String.raw`${NUM}\s*(k)?\s*(?:rupees?|\brs\b|\binr\b|रुपये|रुपए)`, 'gi'), m => num(m[1]) * (m[2] ? 1e3 : 1));
-  take(new RegExp(String.raw`${NUM}\s*(k)?\s*(?:dollars?|\busd\b)`, 'gi'), m => num(m[1]) * (m[2] ? 1e3 : 1) * USD_TO_INR);
+  take(new RegExp(String.raw`(?:\$|\busd\b)\s*${NUM}(?:\s*${USD_UNIT}\b)?`, 'gi'), m => num(m[1]) * (m[2] ? MULT[m[2].toLowerCase()] : 1) * USD_TO_INR);
+  take(new RegExp(String.raw`${NUM}\s*(?:${WORD_UNIT}\s*)?(?:rupees?|\brs\b|\binr\b|रुपये|रुपए)`, 'gi'), m => num(m[1]) * (m[2] ? MULT[m[2].toLowerCase()] : 1));
+  take(new RegExp(String.raw`${NUM}\s*(?:${USD_UNIT}\s*)?(?:dollars?|\busd\b)`, 'gi'), m => num(m[1]) * (m[2] ? MULT[m[2].toLowerCase()] : 1) * USD_TO_INR);
   take(new RegExp(String.raw`${NUM}\s*(lakhs?|lacs?|crores?)\b`, 'gi'), m => num(m[1]) * MULT[m[2].toLowerCase()]);
   return found.sort((a, b) => a.at - b.at).map(f => f.inr);
 }
@@ -153,23 +159,38 @@ const URL_G = /https?:\/\/[^\s<>"')]+/gi;
 const HOST_G = new RegExp(String.raw`(?<![a-z0-9@./-])${HOST}(?::\d{1,5})?(?![a-z0-9-])(?:[/?#][^\s<>"')]*)?`, 'g');
 const trimEnd = (x: string) => x.replace(/[.,;:!?]+$/, '');
 
-// A location reduced to its whole host (with any port) and its path. Null when it is not a plain host/path: userinfo
-// ("host@evil"), backslashes and anything else that browsers and parsers read differently are never accepted.
-interface Loc { host: string; path: string }
+// A location reduced to its whole host (with any port), its path and its query (null when there is none). Everything is
+// lowercased on both sides, so a verbatim FAQ link with capitals matches itself. Null when it is not a plain host/path: userinfo ("host@evil"), backslashes and anything else that browsers
+// and parsers read differently are never accepted.
+interface Loc { host: string; path: string; query: string | null; frag: string | null }
 function parseLoc(raw: string): Loc | null {
   const m = new RegExp(String.raw`^(?:https?:\/\/)?(${HOST}(?::\d{1,5})?)\.?([/?#].*)?$`, 'i').exec(trimEnd(raw));
   if (!m) return null;
-  const path = (m[2] ?? '').replace(/[.,;:!?]+$/, '');
-  return { host: m[1].toLowerCase(), path: path === '/' ? '' : path };
+  const rest = (m[2] ?? '').replace(/[.,;:!?]+$/, '').toLowerCase();
+  const h = rest.indexOf('#');
+  const frag = h < 0 ? null : rest.slice(h + 1);
+  const noFrag = h < 0 ? rest : rest.slice(0, h);
+  const q = noFrag.indexOf('?');
+  const path = q < 0 ? noFrag : noFrag.slice(0, q);
+  const query = q < 0 ? null : noFrag.slice(q + 1);
+  // Dot segments and encoded dots, slashes and backslashes let a path climb out of the place the owner named.
+  if (/(?:^|\/)\.{1,2}(?:\/|$)|%2e|%2f|%5c|\\/.test(path)) return null;
+  return { host: m[1].toLowerCase(), path: path === '/' ? '' : path, query: query === '' ? null : query, frag: frag === '' ? null : frag };
 }
 // A known location covers a reply location on the same whole host when the paths are equal or the known path is a prefix
-// that ends at a /, ? or # boundary. A host known without a path covers only itself.
+// that ends at a / boundary. A host known without a path covers only itself. A query is part of the address: a known
+// location with a query covers only that exact path and query, and a known location without one covers no query at all
+// ("?redirect=..." could point the visitor anywhere). The fragment likewise: a single-page app can route on it, so a reply
+// fragment must equal a known one.
 function covers(known: Loc, reply: Loc): boolean {
   if (known.host !== reply.host) return false;
+  if (reply.frag !== null && reply.frag !== known.frag) return false;
+  if (known.query !== null) return reply.path === known.path && reply.query === known.query;
+  if (reply.query !== null) return false;
   if (known.path === '') return reply.path === '';
   if (reply.path === known.path) return true;
   if (!reply.path.startsWith(known.path)) return false;
-  return /[/?#]/.test(known.path.endsWith('/') ? '/' : reply.path[known.path.length]);
+  return known.path.endsWith('/') || reply.path[known.path.length] === '/';
 }
 
 // Things that could name a place the regexes below cannot read: a scheme other than http(s)://, a protocol-relative //host,
@@ -198,6 +219,8 @@ function locationsLookPlain(reply: string, knowledge: string): boolean {
 
 export function replySafe(reply0: string, knowledge0: string): boolean {
   const reply = normalizeText(reply0), knowledge = normalizeText(knowledge0);
+  // No FAQ at all: nothing the reply says is grounded in what the owner told us, so it is never sent without a look.
+  if (!knowledge) return false;
   if (COMMITMENT.test(reply) || COMMITMENT_INTL.test(reply)) return false;
   if (!locationsLookPlain(reply, knowledge)) return false;
 
@@ -241,7 +264,7 @@ export function replySafe(reply0: string, knowledge0: string): boolean {
   for (const h of noMail.match(HOST_G) ?? []) {
     const l = parseLoc(h);
     if (!l) return false;
-    if (l.path ? !knownLocs.some(k => covers(k, l)) : !knownHosts.has(l.host)) return false;
+    if (l.path || l.query !== null || l.frag !== null ? !knownLocs.some(k => covers(k, l)) : !knownHosts.has(l.host)) return false;
   }
   return true;
 }
