@@ -1,0 +1,22 @@
+[Unit]
+Description=Maya brain: Telegram bridge to Maya
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=maya
+Group=maya
+WorkingDirectory=/opt/maya-brain
+EnvironmentFile=/etc/maya-brain.env
+ExecStart=/usr/bin/node /opt/maya-brain/bridge.mjs
+Restart=always
+RestartSec=5
+MemoryMax=300M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/maya-brain
+
+[Install]
+WantedBy=multi-user.target
