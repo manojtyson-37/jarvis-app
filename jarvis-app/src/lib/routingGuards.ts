@@ -1,3 +1,5 @@
+// Ticket checks (ticketWriteIntent) are kept on purpose although Freshdesk is switched off: replyIntent tests pin the
+// shared veto logic through them, and a future ticketing tool would reuse them.
 // A forced tool_choice on a READ tool must never swallow a write request: "resolve ticket 598317" forced into
 // get_freshdesk_ticket means the update never happens and the model may claim it did (same class as the calendar bug).
 // When this returns true the message stays on tool_choice 'auto' so the model can pick the gated write tool.

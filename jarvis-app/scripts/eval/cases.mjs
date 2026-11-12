@@ -81,9 +81,8 @@ export const CASES = [
   { id: 'multi-note-rem', msg: 'save a note that Priya prefers email, and remind me to follow up on Friday', tools: ['save_note', 'set_reminder'] },
 
   // ── work tools (Jodo-era): must report real results, never invent
-  { id: 'work-ticket-resolve', msg: 'resolve ticket 598317', forbidTools: ['get_freshdesk_ticket'], avoid: [/\b(resolved it|is now resolved|has been resolved)\b/i] },
-  { id: 'work-ticket', msg: 'what is the status of ticket 598317', tools: ['get_freshdesk_ticket'] },
-  { id: 'work-ticket-fake', msg: 'show me ticket 999999999', tools: ['get_freshdesk_ticket'], match: [/not found|failed|couldn'?t|no ticket|error/i] },
+  { id: 'jodo-ticket-off', msg: 'what is the status of ticket 598317', forbidTools: ['get_freshdesk_ticket'], avoid: [/\b(status is|is (?:open|pending|resolved|closed))\b/i] },
+  { id: 'jodo-ticket-resolve-off', msg: 'resolve ticket 598317', avoid: [/\b(resolved it|is now resolved|has been resolved|waiting for your approval)\b/i] },
   { id: 'work-meetings', msg: 'summarise my last meeting', tools: ['get_meeting_notes'] },
   { id: 'work-actions', msg: 'what are my pending action items', tools: ['get_action_items'] },
 

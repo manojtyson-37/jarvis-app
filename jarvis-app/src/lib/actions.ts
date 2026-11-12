@@ -7,13 +7,10 @@
 import { createHash } from 'crypto';
 import { supabase, logTaskExecution } from '@/lib/supabase';
 import { sendEmail } from '@/lib/gmail';
-import { updateTicketStatus, addTicketNote } from '@/lib/freshdesk';
 import { getGoogleAccessToken } from '@/lib/google';
 
 export const GATED_TOOLS = new Set([
   'send_email',
-  'update_freshdesk_ticket',
-  'add_freshdesk_note',
   'create_calendar_event',
   'delete_calendar_event',
 ]);
@@ -43,15 +40,13 @@ export function argsHash(tool: string, args: Record<string, unknown>): string {
 const MAX_PENDING = 5;
 const EXECUTING_STALE_MS = 5 * 60 * 1000;
 const EMAIL_RE = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/;
-const TICKET_RE = /^\d{1,12}$/;
 const EVENT_ID_RE = /^[A-Za-z0-9_-]{1,1024}$/;
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?([+-]\d{2}:\d{2}|Z)?$/;
-const STATUSES = new Set(['open', 'pending', 'resolved', 'closed']);
 const MAX_TEXT = 8000;
 const EXCERPT = 300;
 
 const auditType = (tool: string) =>
-  tool === 'send_email' ? 'email' : tool.includes('calendar') ? 'calendar' : 'freshdesk';
+  tool === 'send_email' ? 'email' : 'calendar';
 
 // The model sometimes drifts and sends an ID as a JSON number — accept that, reject everything else.
 const str = (v: unknown): string =>
@@ -81,18 +76,6 @@ export function validateGatedArgs(tool: string, raw: Record<string, unknown>): V
       if (!subject.trim() || !body.trim()) return { ok: false, error: 'Email needs a subject and a body.' };
       if (body.length > MAX_TEXT || subject.length > 300) return { ok: false, error: 'Email too long.' };
       return { ok: true, args: { to, subject, body }, summary: `Send email to ${to}, subject "${subject}", saying: ${excerpt(body)}` };
-    }
-    case 'update_freshdesk_ticket': {
-      const id = str(raw.ticket_id).trim(), status = str(raw.status).trim().toLowerCase();
-      if (!TICKET_RE.test(id)) return { ok: false, error: 'Ticket ID must be numeric.' };
-      if (!STATUSES.has(status)) return { ok: false, error: 'Status must be open, pending, resolved or closed.' };
-      return { ok: true, args: { ticket_id: id, status }, summary: `Set Freshdesk ticket #${id} to ${status}` };
-    }
-    case 'add_freshdesk_note': {
-      const id = str(raw.ticket_id).trim(), note = str(raw.note);
-      if (!TICKET_RE.test(id)) return { ok: false, error: 'Ticket ID must be numeric.' };
-      if (!note.trim() || note.length > MAX_TEXT) return { ok: false, error: 'Note is empty or too long.' };
-      return { ok: true, args: { ticket_id: id, note }, summary: `Add private note to ticket #${id}: ${excerpt(note)}` };
     }
     case 'create_calendar_event': {
       const title = str(raw.title).trim(), start = str(raw.start).trim(), end = str(raw.end).trim();
@@ -163,9 +146,12 @@ export async function queueAction(
     return n.ok ? `${t}:${JSON.stringify(n.args)}` : '';
   };
   const wanted = sig(tool, v.args);
-  const dupe = (open ?? []).some(r => sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>) === wanted);
+  // Rows for tools that no longer exist (the removed Freshdesk actions) never show on a card and can never run,
+  // so they must not count toward the cap either.
+  const live = (open ?? []).filter(r => GATED_TOOLS.has(r.tool as string) && sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>) !== '');
+  const dupe = live.some(r => sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>) === wanted);
   if (dupe) return `Already waiting for your approval: ${v.summary}.`;
-  if ((open ?? []).length >= MAX_PENDING) {
+  if (live.length >= MAX_PENDING) {
     return `Not queued: ${MAX_PENDING} actions are already waiting for approval. Approve or cancel some first.`;
   }
 
@@ -222,10 +208,6 @@ async function runGatedTool(tool: string, args: Record<string, unknown>): Promis
   switch (tool) {
     case 'send_email':
       return sendEmail(str(args.to), str(args.subject), str(args.body));
-    case 'update_freshdesk_ticket':
-      return updateTicketStatus(str(args.ticket_id), str(args.status));
-    case 'add_freshdesk_note':
-      return addTicketNote(str(args.ticket_id), str(args.note));
     case 'create_calendar_event': {
       const token = await getGoogleAccessToken();
       if (!token) return { ok: false, message: 'Google Calendar not configured.' };

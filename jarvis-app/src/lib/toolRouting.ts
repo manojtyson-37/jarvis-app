@@ -20,11 +20,7 @@ const CATEGORIES: { tools: string[]; re: RegExp }[] = [
   { tools: ['get_morning_briefing'], re: /\b(briefing|brief me|morning|my day|rundown)\b/i },
   { tools: ['read_url'], re: /https?:\/\/|\bwww\./i },
   { tools: ['get_meeting_notes', 'get_action_items', 'complete_action_item'],
-    re: /\b(meeting|meetings|minutes|action items?|to-?dos?|tasks?|fireflies|transcript|call with)\b/i },
-  { tools: ['get_freshdesk_ticket', 'get_latest_ticket', 'get_agent_ticket_count', 'update_freshdesk_ticket', 'add_freshdesk_note'],
-    re: /\b(tickets?|freshdesk|bucket|queue)\b/i },
-  { tools: ['run_redash_query', 'list_redash_queries', 'search_logs'],
-    re: /\b(redash|quer(y|ies)|logs?|coralogix)\b/i },
+    re: /\b(meeting|meetings|minutes|action items?|to-?dos?|tasks?|transcript|call with)\b/i },
 ];
 
 // Always available: cheap, and the most common intents that keywords alone can miss.

@@ -13,7 +13,7 @@ ok('prose untouched', forModel('assistant', 'You have 3 unread emails.') === 'Yo
 ok('gmail check forces', gmailLookupIntent('I had connected manojsuperb09 gmail account'));
 ok('send from gmail not forced', !gmailLookupIntent('send an email to Bob from my gmail'));
 ok('draft not forced', !gmailLookupIntent('draft a gmail to Bob'));
-ok('redash+gmail not forced', !gmailLookupIntent('email the redash result via gmail'));
+ok('send via gmail not forced', !gmailLookupIntent('send the report via gmail'));
 ok('connect gmail not forced', !gmailLookupIntent('connect my gmail'));
 ok('no gmail word', !gmailLookupIntent("what's the weather"));
 const h = historyForModel([

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SESSION_COOKIE, verifySessionToken } from '@/lib/session';
 
-const PUBLIC_PATHS = ['/login', '/api/auth', '/api/cron', '/api/webhooks'];
+const PUBLIC_PATHS = ['/login', '/api/auth', '/api/cron'];
 const STATIC_EXTS = /\.(png|jpg|ico|svg|json|js|css|txt|xml)$/;
 
 export async function middleware(req: NextRequest) {

@@ -526,7 +526,7 @@ export default function MayaPage() {
   const toolMeta = (tool: string) =>
     tool.includes('email') ? { label: 'Send email', Icon: MailIcon }
     : tool.includes('calendar') ? { label: 'Calendar', Icon: CalendarIcon }
-    : { label: 'Freshdesk', Icon: ShieldIcon };
+    : { label: 'Action', Icon: ShieldIcon };
 
   // ── Render ───────────────────────────────────────────────────────────────
 

@@ -11,9 +11,6 @@ import {
   getMeetingNotes, getPendingActionItems, completeActionItem,
 } from '@/lib/supabase';
 import { parseReminderTime } from '@/lib/timeparser';
-import { getTicket, updateTicketStatus, addTicketNote, getLatestTicketInGroups, getOpenTicketCountForAgent, getAgentNameTokens, AGENT_DISAMBIGUATION_PREFIX } from '@/lib/freshdesk';
-import { getQueryResults, listQueries } from '@/lib/redash';
-import { searchLogs } from '@/lib/coralogix';
 import { listRecentEmails, getEmail, listLabels, fetchMessageSummaries } from '@/lib/gmail';
 import { searchDrive, readDriveFile } from '@/lib/drive';
 import { historyForModel, gmailLookupIntent, isPlaceholderReply, calendarReadIntent } from '@/lib/chatContext';
@@ -23,7 +20,7 @@ import { answerInboxTopic } from '@/lib/inboxSearch';
 import { parseStandingInstruction, ruleSavedReply, rulesBlock } from '@/lib/instructions';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { parseReplyIntent, handleReply } from '@/lib/replyIntent';
-import { ticketWriteIntent, mailWriteIntent } from '@/lib/routingGuards';
+import { mailWriteIntent } from '@/lib/routingGuards';
 import { parseAwayIntent } from '@/lib/away/intent';
 import { handleAwayIntent } from '@/lib/away/chat';
 import { getGoogleAccessToken } from '@/lib/google';
@@ -244,7 +241,7 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_meeting_notes',
-      description: 'Get notes and summaries from recent meetings recorded by Fireflies. Use when asked about meetings, what was discussed, or what happened in a call.',
+      description: 'Get notes and summaries from past meetings saved in Maya. Use when asked about meetings, what was discussed, or what happened in a call.',
       parameters: {
         type: 'object',
         properties: {
@@ -277,103 +274,6 @@ const TOOLS: Groq.Chat.ChatCompletionTool[] = [
           item_id: { type: 'string', description: 'The action item UUID' },
         },
         required: ['item_id'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_freshdesk_ticket',
-      description: 'Look up a Freshdesk support ticket by its ID.',
-      parameters: {
-        type: 'object',
-        properties: { ticket_id: { type: 'string', description: 'The Freshdesk ticket number' } },
-        required: ['ticket_id'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_latest_ticket',
-      description: "Get the full details of the single most recently raised Freshdesk ticket, scoped to Manoj's 3 groups (Engineering, ERP Integration, Tech Operation) — use for 'latest ticket' type questions.",
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_agent_ticket_count',
-      description: "Count how many open Freshdesk tickets are assigned to a specific agent — use for 'how many tickets in X's bucket/queue' type questions.",
-      parameters: {
-        type: 'object',
-        properties: { agent_name: { type: 'string', description: "The agent's name, e.g. \"Sahil Parihar\"" } },
-        required: ['agent_name'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'update_freshdesk_ticket',
-      description: 'Update the status of a Freshdesk ticket.',
-      parameters: {
-        type: 'object',
-        properties: {
-          ticket_id: { type: 'string' },
-          status: { type: 'string', description: 'One of: open, pending, resolved, closed' },
-        },
-        required: ['ticket_id', 'status'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'add_freshdesk_note',
-      description: 'Add a private note to a Freshdesk ticket.',
-      parameters: {
-        type: 'object',
-        properties: { ticket_id: { type: 'string' }, note: { type: 'string' } },
-        required: ['ticket_id', 'note'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_redash_query',
-      description: 'Run a saved Redash query by ID and return its latest cached results.',
-      parameters: {
-        type: 'object',
-        properties: { query_id: { type: 'string', description: 'The Redash query ID' } },
-        required: ['query_id'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'list_redash_queries',
-      description: "List or search Manoj's saved Redash queries by name — use when he doesn't know a specific query ID (e.g. 'what Redash queries do I have', 'find the payments query').",
-      parameters: {
-        type: 'object',
-        properties: { search: { type: 'string', description: 'Optional search term to filter by name; omit to list recent queries' } },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'search_logs',
-      description: 'Search application logs in Coralogix using a DataPrime or Lucene query.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'DataPrime query, e.g. "source logs | filter $d.severity == \'ERROR\'"' },
-          hours: { type: 'number', description: 'How many hours back to search (default 1)' },
-        },
-        required: ['query'],
       },
     },
   },
@@ -608,7 +508,7 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
 
     case 'get_meeting_notes': {
       const meetings = await getMeetingNotes(userId, (args.limit as number) ?? 3);
-      if (!meetings.length) return 'No meeting notes yet. Meetings will appear here once Fireflies processes them.';
+      if (!meetings.length) return 'No meeting notes saved.';
       return meetings.map(m => {
         const d = new Date(m.meeting_date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' });
         const dur = m.duration_sec ? ` (${Math.round(m.duration_sec / 60)} min)` : '';
@@ -630,26 +530,6 @@ async function executeTool(name: string, args: Record<string, unknown>, userId: 
     case 'complete_action_item': {
       const found = await completeActionItem(userId, args.item_id as string);
       return found ? 'Action item marked done.' : 'No matching action item found.';
-    }
-
-    case 'get_freshdesk_ticket':
-      return getTicket(args.ticket_id as string);
-
-    case 'get_latest_ticket':
-      return getLatestTicketInGroups();
-
-    case 'get_agent_ticket_count':
-      return getOpenTicketCountForAgent(args.agent_name as string);
-
-    case 'run_redash_query':
-      return getQueryResults(args.query_id as string);
-
-    case 'list_redash_queries':
-      return listQueries(args.search as string | undefined);
-
-    case 'search_logs': {
-      const hours = Math.min(Math.max((args.hours as number) ?? 1, 1), 168);
-      return searchLogs(args.query as string, hours);
     }
 
     case 'list_emails':
@@ -684,7 +564,7 @@ export async function GET() {
 // Tools whose result skips the 2nd (narration) Groq call and gets returned raw instead.
 // Two distinct reasons a tool lands here:
 //  (a) write/confirm actions — a narrated "I did X" adds nothing over the raw confirmation.
-//  (b) high-risk factual lookups — confirmed (Freshdesk ticket, Gmail inbox) that the narration
+//  (b) high-risk factual lookups — confirmed (a ticket lookup, Gmail inbox) that the narration
 //      pass will sometimes disregard the real tool result already in context and fabricate a
 //      different, wrong, plausible-sounding answer instead. Forcing tool_choice on the FIRST
 //      call only guarantees the tool gets called; it does nothing to stop the SECOND call from
@@ -695,16 +575,15 @@ export async function GET() {
 // raw "Waiting for your approval: ..." text must reach the user verbatim — a narration pass could
 // wrongly claim the action already happened.
 // KNOWN GAP, not closed by this set: a turn where the model calls one of these tools ALONGSIDE
-// a tool NOT in this set (e.g. get_freshdesk_ticket + get_calendar_events together) falls through
+// a tool NOT in this set (e.g. list_emails + get_calendar_events together) falls through
 // to the normal narration path below with tool_choice:'auto' — the exact same unresolved
 // fabrication risk this set exists to avoid, just for a mixed-tool turn instead of a single-tool
 // one. This is unchanged risk, not reduced risk, for any multi-tool-type turn.
 const SKIP_NARRATION_TOOLS = new Set([
   'save_note', 'delete_note', 'set_reminder', 'mark_reminder_done',
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
-  'complete_action_item', 'update_freshdesk_ticket', 'add_freshdesk_note', 'send_email', 'create_calendar_event',
-  'get_freshdesk_ticket', 'get_latest_ticket', 'get_agent_ticket_count', 'list_emails', 'get_email', 'list_labels',
-  'run_redash_query', 'list_redash_queries', 'search_drive', 'read_drive_file',
+  'complete_action_item', 'send_email', 'create_calendar_event',
+  'list_emails', 'get_email', 'list_labels', 'search_drive', 'read_drive_file',
 ]);
 
 const ACTIONISH = /\b(send|add|remind|log|save|delete|cancel|set|create|schedule|book|mark|find|search|read|summari[sz]e|move|reschedule|forward|open|list)\b/i;
@@ -721,91 +600,13 @@ export async function POST(req: NextRequest) {
 
   if (!message?.trim()) return NextResponse.json({ error: 'Empty message' }, { status: 400 });
 
-  // History is fetched first (not in parallel with the rest) because deciding whether to
-  // fetch agentNameTokens below depends on it — see awaitingAgentDisambiguation.
   const history = await getConversationHistory(userId, 10);
-  const lastAssistantMsg = history.length ? history[history.length - 1] : null;
-  const awaitingAgentDisambiguationPrompt = lastAssistantMsg?.role === 'assistant'
-    && lastAssistantMsg.content.startsWith(AGENT_DISAMBIGUATION_PREFIX);
-  // The agent list is only fetched when the message could plausibly need it — either it
-  // might be ticket-related at all, or the prior turn asked "which agent did you mean?" and
-  // this message could be answering that — otherwise every casual message (most of them)
-  // would pay for an unnecessary Freshdesk API call just to build a list it'll never use.
-  const mightBeTicketQuestion = /\bticket(s)?\b|\bbucket\b|\bqueue\b/i.test(message);
-  const [memoryFacts, rules, agentNameTokens] = await Promise.all([
-    getPromptFacts(userId, 20),
-    getRules(userId),
-    (mightBeTicketQuestion || awaitingAgentDisambiguationPrompt) ? getAgentNameTokens() : Promise.resolve([] as string[]),
-  ]);
+  const [memoryFacts, rules] = await Promise.all([getPromptFacts(userId, 20), getRules(userId)]);
 
-  // The model has shown it will sometimes skip calling get_freshdesk_ticket entirely and
-  // fabricate a plausible-looking but completely wrong answer (confirmed: finish_reason 'stop'
-  // with no tool_calls, inventing a customer name/email/ticket content) instead of admitting
-  // uncertainty. Rather than bypassing the LLM entirely (which would drop any other intent in
-  // the same message and override cases where the user wasn't actually asking for a lookup),
-  // force tool_choice to that specific function when a ticket number is mentioned — the model
-  // still composes the actual reply and can address the rest of the message, but now always
-  // has real ticket data in context instead of a choice to skip the lookup. Forcing the call is
-  // safe even for a false-positive match ("I already handled ticket 598317") since it's a
-  // read-only lookup, not a side-effecting action.
-  // Confirmed: the exact same skip-and-fabricate failure happens for Gmail too (model invented
-  // a detailed fake inbox — specific senders, subjects — when the real unread count was 0).
-  // Tried forcing generic tool_choice:'required' first — rejected on review: 'required' isn't
-  // scoped to the 3 Gmail functions, it just forces *some* tool from the full ~20-tool list, so
-  // an over-broad keyword match could silently force-execute an unrelated write (e.g. save_note)
-  // with no narration pass left to catch the mismatch. Force the specific list_emails function
-  // instead, matching the ticket pattern, and narrow the trigger to inbox-check phrasing (not
-  // bare "email" — that would wrongly also fire on "what's my email address").
-  const ticketMatch = ticketWriteIntent(message) ? null : /\bticket\s*#?\s*(\d{4,})\b/i.exec(message);
-  // "latest ticket raised" / "any new tickets" — a recency question, distinct from a
-  // specific-ID lookup (ticketMatch always wins when a real number is present). Routes to
-  // get_latest_ticket, which returns full detail on the single newest ticket across Manoj's
-  // 3 groups (Engineering / ERP Integration / Tech Operation) — there is no separate
-  // "list all my tickets" tool, so any ticket-recency phrasing resolves to this.
-  // Requires a recency/support word co-occurring with "ticket(s)" (same AND-shape as the
-  // other forced-tool regexes below) — a bare "tickets" alone would also force this on
-  // "I need two tickets for the concert", an unrelated message with no Freshdesk intent.
-  const ticketListMatch = !ticketMatch && !ticketWriteIntent(message) && /\b(latest|recent|newest|last|new|open|any|support|freshdesk|raised)\b.{0,20}\bticket(s)?\b|\bticket(s)?\b.{0,20}\b(latest|recent|newest|raised|support|freshdesk)\b/i.test(message);
-  // "how many tickets in X's bucket/queue" — a per-agent count, distinct from both the
-  // specific-ID lookup and the single-latest-ticket lookup above. Checked before
-  // ticketListMatch's broader "open"+"ticket" pattern so a count question doesn't get
-  // misrouted to get_latest_ticket (both would otherwise match "tickets are open").
-  // Five review rounds caught real bugs here. Round 1: a bare "how many"+"ticket"
-  // co-occurrence (no name requirement) matched general questions like "how many tickets
-  // are open right now?", hijacking them with nothing to fill the required agent_name param.
-  // Round 2: the round-1 fix (bare two-capitalized-word pattern near "ticket") swung too far
-  // the other way — matched unrelated messages like "I need two tickets for the Ed Sheeran
-  // concert", and separately still missed "how many tickets does Priya have?" (single first
-  // name). Round 3's attempted fix (any capitalized word, not just two in a row) swung back
-  // too far again — ordinary capitalized words (place names, weekdays, months, team/product
-  // names: "tickets open in Mumbai?", "tickets in Engineering?") are common enough in real
-  // ticket-count questions that "any capitalized word" isn't a usable proxy for "names a real
-  // agent" at all. Round 4 switched to checking against the REAL agent list (agentNameTokens)
-  // instead of guessing from capitalization, but two bugs remained: a left-boundary-only regex
-  // match (needed to catch "Parihars" with no apostrophe) let ordinary words PREFIX-collide
-  // ("Nairobi" matching surname token "Nair", "Josephine" matching "Jose"); and the bucket/queue
-  // alternative below had no name requirement at all ("how many tickets are in the queue?"
-  // forced the tool with nothing to fill agent_name). Round 5 fixed both by extracting one
-  // shared, trailing-boundary-safe name-match helper (agentNameMentioned) and requiring it on
-  // EVERY branch, including bucket/queue and the disambiguation-reply check further down —
-  // the earlier version of the disambiguation check used a naive .includes() substring test
-  // instead of this helper, which reintroduced the exact same prefix-collision class through a
-  // different path ("I love balsamic vinegar" matching token "Sam" from an agent's name).
-  // `(?:'s|s)?` allows the possessive-without-apostrophe case this was built for ("Parihars")
-  // while still requiring a real word-break or bare "s" after the name, so "Nair" no longer
-  // matches inside "Nairobi". A real agent whose surname IS an ordinary English word (e.g. an
-  // agent actually named "... Watts") remains a known, accepted residual risk no regex can
-  // close — see the comment on GENERIC_AGENT_WORDS.
-  const agentNameMentioned = (text: string) => agentNameTokens.some(name =>
-    new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:'s|s)?\\b`, 'i').test(text)
-  );
-  const agentCountMatch = !ticketMatch && !ticketWriteIntent(message) && agentNameMentioned(message) && (
-    /\bticket(s)?\b.{0,40}\b(bucket|queue)\b|\b(bucket|queue)\b.{0,40}\bticket(s)?\b/i.test(message)
-    || (
-      /\bticket(s)?\b/i.test(message)
-      && /\b(how many|number of|count of|assigned to)\b/i.test(message)
-    )
-  );
+  // The model has shown it will sometimes skip a lookup tool entirely and fabricate a plausible but wrong answer
+  // (finish_reason 'stop', no tool_calls: a detailed fake inbox when the real unread count was 0). So a clear lookup
+  // message forces tool_choice to that specific read function; the model still writes the reply. Never generic
+  // 'required': that could force an unrelated write from the full tool list.
   // A Gmail message ID is a long hex string — check for one BEFORE the general inbox-check
   // match below, so "show me email <id>" routes to get_email rather than getting swept into
   // the broader "show...email" inbox-check pattern and incorrectly forced to list_emails.
@@ -813,7 +614,7 @@ export async function POST(req: NextRequest) {
   // Scoped to email/Gmail context, not bare "label" — otherwise "what label would you give
   // this idea" or "add a label to this note" would wrongly force a Gmail tool call too.
   const labelMatch = /\blabels?\b.{0,20}\b(email|gmail|inbox)\b|\b(email|gmail|inbox)\b.{0,20}\blabels?\b/i.test(message);
-  // "gmail" (without send/draft/reply/redash intent) forces the read-only lookup: "I connected my gmail account" matched
+  // "gmail" (without send/draft/reply intent) forces the read-only lookup: "I connected my gmail account" matched
   // nothing, so the model answered from stale chat history (old Jodo lists) instead of checking the inbox.
   // An explicit "send an email to X" must reach send_email (which only QUEUES it for approval). Left on 'auto',
   // the model sometimes skipped the tool and answered as if the email had been handled. "draft" is excluded on
@@ -823,60 +624,17 @@ export async function POST(req: NextRequest) {
     && !/\b(draft|compose|write|unread|inbox)\b|\bsend me\b|\b(don'?t|do not|never|not)\b/i.test(message);
   const inboxCheckMatch = !emailIdMatch && !labelMatch && !mailWriteIntent(message)
     && (/\b(unread|inbox)\b|\b(check|show|read|any|list)\b.{0,20}\b(emails?|mail)\b/i.test(message) || gmailLookupIntent(message));
-  // "redash" is distinctive enough on its own (unlike "ticket") that it doesn't need the
-  // AND-of-two-signals treatment the email/ticket regexes above do — no unrelated casual
-  // message plausibly contains it. A nearby number means a specific known query ID
-  // (run_redash_query); otherwise it's a browse/search request (list_redash_queries), since
-  // run_redash_query was never given its own forced-tool-choice trigger before this and was
-  // exposed to the same skip-and-fabricate risk get_freshdesk_ticket had prior to its fix.
-  // Review caught that a bare "any 2+ digit number anywhere in the message" was too broad —
-  // "redash query about 2024 revenue" and "find the query for Q3 2024 churn" both have no
-  // actual known ID, just an unrelated year, and both wrongly routed to run_redash_query
-  // instead of the search tool. Requires the number to sit immediately after "redash" or
-  // "query" (optionally "id"/"#"/":" in between, nothing else) — a real ID reference like
-  // "query 1234", "redash #1234", "query id 1234" still matches; a descriptive mention with
-  // other words between the keyword and the number does not.
-  const redashMentioned = /\bredash\b/i.test(message);
-  const redashIdMatch = redashMentioned && /\b(?:redash|query)\b\s*(?:id\s*)?#?\s*:?\s*\d+\b/i.test(message);
-  // If the previous assistant turn was get_agent_ticket_count's own "which one?" ambiguity
-  // prompt, the user's reply (e.g. "Manoj R") won't match any regex above — falling through
-  // to tool_choice:'auto' would hit the exact skip-and-fabricate failure mode this whole
-  // forced-tool-choice architecture exists to avoid. Checked LAST, only as a fallback when
-  // nothing else matched — review caught an earlier version of this that was OR'd in at the
-  // TOP of the chain, which meant any unrelated follow-up message (a new ticket number, an
-  // inbox check) got wrongly re-forced into this tool instead of its own correct one for a
-  // full turn after any ambiguity prompt. Also requires the reply to actually name one of the
-  // real agents the prompt offered — review caught that without this, a totally unrelated
-  // reply ("never mind, what's the weather") still got force-routed here just because it
-  // happened to follow the ambiguity prompt, with nothing to fill agent_name. A later review
-  // round caught that the first fix for this used a naive .includes() substring check instead
-  // of the same word-boundary-safe agentNameMentioned() helper used above — reopening the
-  // identical prefix-collision bug through a different path ("I love balsamic vinegar"
-  // matching token "Sam" from an unrelated agent's name). Reuses the shared helper instead.
-  const awaitingAgentDisambiguation = awaitingAgentDisambiguationPrompt && !ticketWriteIntent(message) && agentNameMentioned(message);
-  const forcedToolChoice = ticketMatch
-    ? { type: 'function' as const, function: { name: 'get_freshdesk_ticket' } }
-    : agentCountMatch
-    ? { type: 'function' as const, function: { name: 'get_agent_ticket_count' } }
-    : ticketListMatch
-    ? { type: 'function' as const, function: { name: 'get_latest_ticket' } }
-    : emailIdMatch
-      ? { type: 'function' as const, function: { name: 'get_email' } }
-      : labelMatch
-        ? { type: 'function' as const, function: { name: 'list_labels' } }
-        : sendMailMatch
-          ? { type: 'function' as const, function: { name: 'send_email' } }
-          : inboxCheckMatch
+  const forcedToolChoice = emailIdMatch
+    ? { type: 'function' as const, function: { name: 'get_email' } }
+    : labelMatch
+      ? { type: 'function' as const, function: { name: 'list_labels' } }
+      : sendMailMatch
+        ? { type: 'function' as const, function: { name: 'send_email' } }
+        : inboxCheckMatch
           ? { type: 'function' as const, function: { name: 'list_emails' } }
-          : redashIdMatch
-            ? { type: 'function' as const, function: { name: 'run_redash_query' } }
-            : redashMentioned
-              ? { type: 'function' as const, function: { name: 'list_redash_queries' } }
-              : calendarReadIntent(message)
-              ? { type: 'function' as const, function: { name: 'get_calendar_events' } }
-              : awaitingAgentDisambiguation
-                ? { type: 'function' as const, function: { name: 'get_agent_ticket_count' } }
-                : 'auto' as const;
+          : calendarReadIntent(message)
+            ? { type: 'function' as const, function: { name: 'get_calendar_events' } }
+            : 'auto' as const;
 
   // Only the tool definitions this message can need — see toolRouting.ts for why.
   const forcedName = typeof forcedToolChoice === 'object' ? forcedToolChoice.function.name : undefined;

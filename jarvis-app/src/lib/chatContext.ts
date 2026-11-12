@@ -40,7 +40,7 @@ export function forModel(role: 'user' | 'assistant', content: string): string {
 
 // "gmail" alone forces the read-only inbox lookup, unless the message is clearly an action or another tool's job.
 export function gmailLookupIntent(message: string): boolean {
-  return /\bgmail\b/i.test(message) && !/\b(send|draft|compose|reply|forward|write|connect|redash)\b/i.test(message);
+  return /\bgmail\b/i.test(message) && !/\b(send|draft|compose|reply|forward|write|connect)\b/i.test(message);
 }
 
 // A read-only calendar question must hit the tool: left on 'auto' the model skipped it on production and invented events.

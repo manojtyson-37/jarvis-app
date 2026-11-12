@@ -41,14 +41,6 @@
       "schedule": "0 13 * * 1-5"
     },
     {
-      "path": "/api/cron/sync-meetings",
-      "schedule": "0 * * * *"
-    },
-    {
-      "path": "/api/cron/sync-freshdesk",
-      "schedule": "0 * * * *"
-    },
-    {
       "path": "/api/cron/sync-gmail",
       "schedule": "0 * * * *"
     },

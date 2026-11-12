@@ -319,24 +319,6 @@ export interface ActionItem {
   completed_at: string | null;
 }
 
-export async function saveMeetingNote(
-  userId: string,
-  data: {
-    meeting_id: string;
-    title: string;
-    meeting_date: string;
-    duration_sec?: number;
-    participants?: string[];
-    summary?: string;
-    raw_transcript?: string;
-    raw_payload?: object;
-  }
-) {
-  const { error } = await supabase.from('meeting_notes')
-    .upsert({ user_id: userId, ...data }, { onConflict: 'meeting_id' });
-  if (error) throw error;
-}
-
 export async function getMeetingNotes(userId: string, limit = 5): Promise<MeetingNote[]> {
   const { data, error } = await supabase
     .from('meeting_notes')
@@ -344,34 +326,6 @@ export async function getMeetingNotes(userId: string, limit = 5): Promise<Meetin
     .eq('user_id', userId).order('meeting_date', { ascending: false }).limit(limit);
   if (error) throw error;
   return (data ?? []) as MeetingNote[];
-}
-
-export async function meetingExists(meetingId: string): Promise<boolean> {
-  const { data, error } = await supabase
-    .from('meeting_notes').select('id').eq('meeting_id', meetingId).maybeSingle();
-  if (error) throw error;
-  return data !== null;
-}
-
-// Atomically claims a meeting_id before expensive processing (Groq extraction) begins,
-// so a webhook firing concurrently with the reconciliation cron can't both process the
-// same meeting — only the caller that wins the insert proceeds; the loser gets `false`.
-export async function claimMeeting(userId: string, meetingId: string, title: string): Promise<boolean> {
-  const { data, error } = await supabase
-    .from('meeting_notes')
-    .upsert(
-      { user_id: userId, meeting_id: meetingId, title, meeting_date: new Date().toISOString() },
-      { onConflict: 'meeting_id', ignoreDuplicates: true }
-    )
-    .select('meeting_id');
-  if (error) throw error;
-  return (data?.length ?? 0) > 0;
-}
-
-export async function deleteMeetingNote(userId: string, meetingId: string) {
-  const { error } = await supabase
-    .from('meeting_notes').delete().eq('meeting_id', meetingId).eq('user_id', userId);
-  if (error) throw error;
 }
 
 export async function saveActionItems(
@@ -412,7 +366,7 @@ export async function completeActionItem(userId: string, itemId: string): Promis
 
 export async function logTaskExecution(
   userId: string,
-  actionType: 'freshdesk' | 'redash' | 'coralogix' | 'email' | 'calendar',
+  actionType: 'email' | 'calendar',
   description: string,
   payload?: object
 ) {
@@ -420,21 +374,6 @@ export async function logTaskExecution(
     user_id: userId, action_type: actionType, description, payload: payload ?? null,
   });
   if (error) console.error('logTaskExecution failed:', error.message);
-}
-
-// ── Freshdesk Sync ───────────────────────────────────────────────────────────
-
-export async function isFreshdeskTicketSeen(ticketId: string): Promise<boolean> {
-  const { data, error } = await supabase
-    .from('freshdesk_tickets_seen').select('ticket_id').eq('ticket_id', ticketId).maybeSingle();
-  if (error) throw error;
-  return data !== null;
-}
-
-export async function markFreshdeskTicketSeen(userId: string, ticketId: string) {
-  const { error } = await supabase
-    .from('freshdesk_tickets_seen').insert({ ticket_id: ticketId, user_id: userId });
-  if (error) throw error;
 }
 
 // ── Gmail Sync ───────────────────────────────────────────────────────────────

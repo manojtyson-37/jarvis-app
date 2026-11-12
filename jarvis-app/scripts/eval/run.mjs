@@ -8,7 +8,7 @@ const BASE = arg('--base', 'http://localhost:3001');
 const ONLY = arg('--only', '')?.split(',').filter(Boolean);
 const OUT = arg('--out', '');
 if (!/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE)) { console.error('Refusing to run: --base must be localhost. Outside dev the eval header is ignored and tests would act as the real user.'); process.exit(2); }
-const GATED = new Set(['send_email', 'update_freshdesk_ticket', 'add_freshdesk_note', 'create_calendar_event', 'delete_calendar_event']);
+const GATED = new Set(['send_email', 'create_calendar_event', 'delete_calendar_event']);
 
 const env = Object.fromEntries(fs.readFileSync(new URL('../../.env.local', import.meta.url), 'utf8').split('\n').filter(l => l.includes('=')).map(l => { const i = l.indexOf('='); return [l.slice(0, i), l.slice(i + 1).replace(/^["']|["']$/g, '')]; }));
 
