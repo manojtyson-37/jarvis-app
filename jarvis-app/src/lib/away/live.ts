@@ -1,7 +1,7 @@
-// Away Mode wired to the real world: Gmail, Groq, the database, push and Telegram. Everything decision-related stays in
+// Away Mode wired to the real world: Gmail, Claude, the database, push and Telegram. Everything decision-related stays in
 // policy.ts / engine.ts; this file only plugs the I/O in.
 import 'server-only';
-import Groq from 'groq-sdk';
+import { llm as claude } from '@/lib/llm';
 import { getInboundMessage, listMessageIds, getOwnAddress, sendReplyInThread, fetchMessageSummaries, getEmail } from '@/lib/gmail';
 import { inboxSubjectWords } from '@/lib/grounded';
 import { sendPush } from '@/lib/push';
@@ -13,9 +13,10 @@ import { formatDigest } from './digest';
 import * as store from './store';
 
 // maxRetries 0: a hidden SDK backoff would eat the cron's time budget; the fallback model is the retry.
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY, maxRetries: 0 });
+// Claude via src/lib/llm.ts (no SDK retries); the old name keeps the call below unchanged.
+const groq = claude;
 export const RUN_BUDGET_MS = 45_000;
-const MODELS = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b'];
+const MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5'];
 
 async function llm(system: string, user: string, maxTokens: number): Promise<string> {
   let last: unknown;
@@ -23,7 +24,7 @@ async function llm(system: string, user: string, maxTokens: number): Promise<str
     try {
       const c = await groq.chat.completions.create({
         model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0,
-        max_tokens: i === 0 ? maxTokens : maxTokens + 500, // the fallback spends some tokens reasoning first
+        max_tokens: i === 0 ? maxTokens : maxTokens + 500, // headroom for the fallback model's longer replies
         ...(i === 0 ? {} : { reasoning_effort: 'low' as const }),
       });
       const text = c.choices[0]?.message?.content ?? '';

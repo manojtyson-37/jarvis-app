@@ -1,14 +1,15 @@
 import { NextResponse } from 'next/server';
-import Groq from 'groq-sdk';
+import { llm } from '@/lib/llm';
 import { getRecentConversations, saveEvolutionLog, saveMemoryFacts, getPushSubscriptions, getPromptFacts } from '@/lib/supabase';
 import { ruleKey } from '@/lib/instructions';
 import { safeFactCategory, isReservedFactCategory, FACT_CATEGORIES } from '@/lib/memoryCategory';
 import webpush from 'web-push';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// Claude via src/lib/llm.ts; the old name keeps the calls below unchanged.
+const groq = llm;
 const USER_ID = 'manoj';
-// Not in the SDK's types yet; spread so Groq still receives it (same as the chat route's fallbackOpts).
-const LOW_EFFORT = { reasoning_effort: 'low' as const };
+// Up to two model calls of 20s each, plus database work.
+export const maxDuration = 60;
 
 export async function GET(req: Request) {
   const secret = process.env.CRON_SECRET;
@@ -31,37 +32,27 @@ export async function GET(req: Request) {
 - suggestions: array of {feature, priority:"high"|"medium", why} — features that would have helped (max 3)
 - summary: one sentence describing today's usage pattern`;
 
-  // gpt-oss reasons before answering: 600 tokens left nothing for the JSON and Groq rejected every run
-  // ("json_validate_failed", empty failed_generation) from at least 2026-11-10. Low effort and a bigger budget,
-  // and one retry without strict JSON mode, parsed by hand.
-  let raw = '{}';
-  try {
-    const analysis = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-20b',
-      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: transcript }],
-      max_tokens: 2500,
-      ...LOW_EFFORT,
-      response_format: { type: 'json_object' },
-    });
-    raw = analysis.choices[0]?.message?.content ?? '{}';
-  } catch (e) {
-    console.warn('evolve: strict JSON call failed, retrying loose:', (e as Error).message.slice(0, 200));
+  // Claude has no server-side JSON validation: pull the {...} out of the reply and parse it ourselves, and try once
+  // more when that fails or the reply was cut off at the token limit.
+  let parsed: { gaps?: unknown[]; new_facts?: { fact: string; category: string }[]; suggestions?: unknown[]; summary?: string } | null = null;
+  for (let attempt = 1; attempt <= 2 && !parsed; attempt++) {
     try {
       const analysis = await groq.chat.completions.create({
-        model: 'openai/gpt-oss-20b',
+        model: 'claude-haiku-5-5',
         messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: transcript }],
         max_tokens: 2500,
-        ...LOW_EFFORT,
+        response_format: { type: 'json_object' },
       });
       const text = analysis.choices[0]?.message?.content ?? '';
-      raw = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1) || '{}';
-    } catch (e2) {
-      console.error('evolve: analysis failed:', (e2 as Error).message.slice(0, 200));
-      return NextResponse.json({ ok: false, error: 'analysis failed' });
+      const cut = analysis.choices[0]?.finish_reason === 'length';
+      const raw = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
+      if (!cut && raw) parsed = JSON.parse(raw);
+      else console.warn(`evolve: attempt ${attempt} ${cut ? 'cut off' : 'had no JSON'}`);
+    } catch (e) {
+      console.warn(`evolve: attempt ${attempt} failed:`, (e as Error).message.slice(0, 200));
     }
   }
-  let parsed: { gaps?: unknown[]; new_facts?: { fact: string; category: string }[]; suggestions?: unknown[]; summary?: string } = {};
-  try { parsed = JSON.parse(raw); } catch { console.warn('evolve: unparseable analysis'); }
+  if (!parsed) return NextResponse.json({ ok: false, error: 'analysis failed' });
 
   const today = new Date().toISOString().split('T')[0];
   const gaps = parsed.gaps ?? [];

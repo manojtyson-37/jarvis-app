@@ -1,8 +1,9 @@
-import Groq from 'groq-sdk';
+import { llm } from '@/lib/llm';
 import { getMemoryFacts, saveMemoryFacts, getPushSubscriptions } from '@/lib/supabase';
 import webpush from 'web-push';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// Claude via src/lib/llm.ts; the old name keeps the call below unchanged.
+const groq = llm;
 
 const QUESTION_AREAS = [
   'morning routine and energy patterns across the day',
@@ -35,7 +36,7 @@ export async function generateAndPushQuestion(userId: string): Promise<{ questio
   const area = QUESTION_AREAS[Math.floor(Math.random() * QUESTION_AREAS.length)];
 
   const result = await groq.chat.completions.create({
-    model: 'openai/gpt-oss-20b',
+    model: 'claude-haiku-5-5',
     messages: [{
       role: 'system',
       content: `You are Maya, a sharp personal AI learning about Manoj. Ask ONE specific, honest question to understand him better in this area: "${area}".
