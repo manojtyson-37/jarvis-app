@@ -15,7 +15,8 @@ async function extract(text: string): Promise<string[]> {
     messages: [{ role: 'system', content: EXTRACT_SYSTEM }, { role: 'user', content: text.slice(0, 6000) }],
     ...fallbackOpts(model),
   }), Date.now());
-  try { return cleanExtracted(JSON.parse(res.choices[0]?.message?.content ?? '{}')); } catch { return []; }
+  // A reply that isn't JSON throws, so the source is not marked seen and the next run retries it.
+  return cleanExtracted(JSON.parse(res.choices[0]?.message?.content ?? ''));
 }
 
 // Starred mail and mail he sends himself, last 2 days. Each message is read once (seen-key dedupe).
@@ -25,8 +26,10 @@ export async function collectEmailTodos(userId: string): Promise<number> {
     const msgs = await fetchMessageSummaries(q, 5, 5);
     for (const m of msgs ?? []) {
       const key = `todo-mail:${m.id}`;
-      if (m.automated || await sourceSeen(key)) continue;
-      const todos = await extract(`Subject: ${m.subject}\nFrom: ${m.fromName}\n${m.snippet ?? ''}`);
+      if (m.automated || await sourceSeen(userId, key)) continue;
+      // One bad source must not stop the rest; it stays unseen and is retried while it is inside the 2-day window.
+      let todos: string[];
+      try { todos = await extract(`Subject: ${m.subject}\nFrom: ${m.fromName}\n${m.snippet ?? ''}`); } catch (e) { console.warn('todo email extract failed:', (e as Error).message?.slice(0, 120)); continue; }
       added += (await insertTodos(userId, todos, 'email')).length;
       await markSourceSeen(userId, key);
     }
@@ -41,10 +44,11 @@ export async function collectMeetingTodos(userId: string): Promise<number> {
   let added = 0;
   for (const d of docs ?? []) {
     const key = `todo-drive:${d.id}`;
-    if (await sourceSeen(key)) continue;
+    if (await sourceSeen(userId, key)) continue;
     const text = await readDriveFile(d.id);
     if (/^(Invalid|Drive (?:file lookup|read) failed|Drive not configured)/.test(text)) continue;
-    const todos = await extract(`Meeting notes: ${d.name}\n${text}`);
+    let todos: string[];
+    try { todos = await extract(`Meeting notes: ${d.name}\n${text}`); } catch (e) { console.warn('todo meeting extract failed:', (e as Error).message?.slice(0, 120)); continue; }
     added += (await insertTodos(userId, todos, 'meeting')).length;
     await markSourceSeen(userId, key);
   }

@@ -1,6 +1,6 @@
 import { parseTodoCapture, cleanExtracted } from '../../../src/lib/todos/capture';
 import { buildReport, manualReason } from '../../../src/lib/todos/report';
-import { finalTier, safetyFloor, heuristicKind, toolsForTier, isKind, urlsIn, urlAllowed } from '../../../src/lib/todos/classify';
+import { finalTier, safetyFloor, heuristicKind, toolsForTier, isKind, urlsIn, urlAllowed, narrowAfterPrivateRead } from '../../../src/lib/todos/classify';
 let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
 const eq = (n: string, a: unknown, b: unknown) => ok(`${n} (${JSON.stringify(a)})`, JSON.stringify(a) === JSON.stringify(b));
 
@@ -82,6 +82,10 @@ const seen = new Set(urlsIn('read https://example.com/a. and http://x.io/b').map
 ok('url seen allowed', urlAllowed('https://example.com/a', seen) && urlAllowed('http://x.io/b', seen));
 ok('built url blocked', !urlAllowed('https://evil.com/?d=secret', seen) && !urlAllowed('https://example.com/a?d=secret', seen));
 ok('non-string url blocked', !urlAllowed(undefined, seen));
+const after = narrowAfterPrivateRead(toolsForTier('auto', 'chat'), true);
+ok('after private read: no web tools', !after.has('web_search') && !after.has('read_url'));
+ok('after private read: private + safe writes stay', after.has('get_email') && after.has('save_note'));
+ok('before private read unchanged', narrowAfterPrivateRead(toolsForTier('auto', 'chat'), false).has('web_search'));
 
 // ── report ───────────────────────────────────────────────────────────────
 eq('empty batch reports nothing', buildReport([]), null);

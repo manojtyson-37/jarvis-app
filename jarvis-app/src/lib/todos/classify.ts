@@ -65,12 +65,18 @@ export function heuristicKind(text: string): Kind {
   return 'manual';
 }
 
-const WEB_TOOLS = ['web_search', 'read_url'];
+export const WEB_TOOLS = ['web_search', 'read_url'];
 // Private data. Never given to a to-do whose wording came from someone else: with nobody watching, injected text
 // could read his mail and carry it out through read_url.
-const PRIVATE_READERS = ['list_emails', 'get_email', 'search_drive', 'read_drive_file', 'get_calendar_events', 'search_notes', 'get_recent_notes'];
+export const PRIVATE_READERS = ['list_emails', 'get_email', 'search_drive', 'read_drive_file', 'get_calendar_events', 'search_notes', 'get_recent_notes'];
 const SAFE_WRITES = ['save_note', 'set_reminder'];
 const GATED = ['send_email', 'create_calendar_event', 'delete_calendar_event'];
+
+// Once private data has been read in a run, nothing that reaches the internet may run after it: a search query or a
+// URL could carry that data out (injected text in an email can ask for exactly that).
+export function narrowAfterPrivateRead(allowed: ReadonlySet<string>, privateRead: boolean): Set<string> {
+  return privateRead ? new Set([...allowed].filter(t => !WEB_TOOLS.includes(t))) : new Set(allowed);
+}
 
 export function toolsForTier(tier: Tier, source: TodoSource = 'chat'): Set<string> {
   if (tier === 'manual') return new Set();

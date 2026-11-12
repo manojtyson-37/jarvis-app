@@ -58,8 +58,8 @@ export async function finish(userId: string, id: string, status: FinalStatus): P
 
 // Dedupe for collected sources (an email or a meeting doc becomes to-dos once). Reuses the seen-id table with a prefix.
 // Checked first and marked only after its to-dos are saved, so a failed extraction is retried next run.
-export async function sourceSeen(key: string): Promise<boolean> {
-  const { data, error } = await supabase.from('gmail_messages_seen').select('message_id').eq('message_id', key).maybeSingle();
+export async function sourceSeen(userId: string, key: string): Promise<boolean> {
+  const { data, error } = await supabase.from('gmail_messages_seen').select('message_id').eq('message_id', key).eq('user_id', userId).maybeSingle();
   if (error) throw error;
   return data !== null;
 }
