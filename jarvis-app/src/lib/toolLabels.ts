@@ -8,5 +8,5 @@ export const TOOL_LABELS: Record<string, string> = {
   log_workout: 'Logging the workout', get_recent_workouts: 'Checking workouts',
   log_expense: 'Logging the expense', log_income: 'Logging the income', get_finance_summary: 'Totalling your spending',
   get_morning_briefing: 'Putting your briefing together', web_search: 'Searching the web', read_url: 'Reading the page',
-  get_meeting_notes: 'Opening meeting notes', get_action_items: 'Checking action items', complete_action_item: 'Updating the item',
+  get_meeting_notes: 'Opening meeting notes', get_action_items: 'Checking action items', complete_action_item: 'Updating the item', add_todos: 'Adding to-dos',
 };

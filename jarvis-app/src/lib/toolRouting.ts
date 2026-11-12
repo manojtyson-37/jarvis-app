@@ -19,7 +19,7 @@ const CATEGORIES: { tools: string[]; re: RegExp }[] = [
     re: /\b(expenses?|spent|spend|spending|income|salary|paid|pay|earned|budget|finance|rupees?|rs\.?|₹|cost|bought|bill|burn|burned|savings?)\b/i },
   { tools: ['get_morning_briefing'], re: /\b(briefing|brief me|morning|my day|rundown)\b/i },
   { tools: ['read_url'], re: /https?:\/\/|\bwww\./i },
-  { tools: ['get_meeting_notes', 'get_action_items', 'complete_action_item'],
+  { tools: ['get_meeting_notes', 'get_action_items', 'complete_action_item', 'add_todos'],
     re: /\b(meeting|meetings|minutes|action items?|to-?dos?|tasks?|transcript|call with)\b/i },
 ];
 

@@ -148,8 +148,10 @@ export async function queueAction(
   const wanted = sig(tool, v.args);
   // Rows for tools that no longer exist (the removed Freshdesk actions) never show on a card and can never run,
   // so they must not count toward the cap either.
-  const live = (open ?? []).filter(r => GATED_TOOLS.has(r.tool as string) && sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>) !== '');
-  const dupe = live.some(r => sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>) === wanted);
+  const liveSigs = (open ?? []).filter(r => GATED_TOOLS.has(r.tool as string))
+    .map(r => sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>)).filter(Boolean);
+  const live = liveSigs;
+  const dupe = liveSigs.includes(wanted);
   if (dupe) return `Already waiting for your approval: ${v.summary}.`;
   if (live.length >= MAX_PENDING) {
     return `Not queued: ${MAX_PENDING} actions are already waiting for approval. Approve or cancel some first.`;
