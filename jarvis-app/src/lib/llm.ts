@@ -135,8 +135,59 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries
 // the force becomes a hint; if the model still skips the tool, fail the call rather than return a made-up answer.
 export function forcedToolSkipped(p: ChatParams, r: Groq.Chat.ChatCompletion): boolean {
   const tc = p.tool_choice;
-  const forced = tc === 'required' || (!!tc && typeof tc === 'object' && tc.type === 'function');
-  return forced && !forcedToolAllowed(p.model) && !(r.choices[0]?.message?.tool_calls?.length);
+  const named = !!tc && typeof tc === 'object' && tc.type === 'function' ? tc.function.name : null;
+  const forced = tc === 'required' || !!named;
+  if (!forced || forcedToolAllowed(p.model)) return false;
+  const calls = r.choices[0]?.message?.tool_calls ?? [];
+  // A named force must call that tool; calling some other tool still skips the read the force exists for.
+  return named ? !calls.some(c => c.function.name === named) : !calls.length;
+}
+
+const textDelta = (ev: Anthropic.RawMessageStreamEvent): Delta | null =>
+  ev.type === 'content_block_delta' && ev.delta.type === 'text_delta' ? { choices: [{ delta: { content: ev.delta.text } }] } : null;
+
+// Read up to the first text before returning, so an overload or error that arrives early in the stream
+// still throws inside withFallback and can move to the other model. Later errors end the stream.
+// The returned iterator closes the request on return() even if nothing was read yet (a generator would not).
+export async function readHead(events: AsyncIterable<Anthropic.RawMessageStreamEvent>): Promise<AsyncIterableIterator<Delta>> {
+  const it = events[Symbol.asyncIterator]();
+  const closeSource = async () => { try { await it.return?.(); } catch { /* already closed */ } };
+  const head: Delta[] = [];
+  let ended = false;
+  try {
+    while (!head.length) {
+      const n = await it.next();
+      if (n.done) { ended = true; break; }
+      const d = textDelta(n.value);
+      if (d) head.push(d);
+    }
+  } catch (e) {
+    await closeSource();
+    throw e;
+  }
+  let closed = false;
+  const close = async () => { if (closed) return; closed = true; if (!ended) await closeSource(); };
+  const finished = { done: true as const, value: undefined };
+  const out: AsyncIterableIterator<Delta> = {
+    [Symbol.asyncIterator]() { return out; },
+    async next() {
+      if (head.length) return { done: false, value: head.shift()! };
+      if (ended || closed) { await close(); return finished; }
+      try {
+        for (;;) {
+          const n = await it.next();
+          if (n.done) { ended = true; closed = true; return finished; }
+          const d = textDelta(n.value);
+          if (d) return { done: false, value: d };
+        }
+      } catch (e) {
+        await close();
+        throw e;
+      }
+    },
+    async return() { await close(); return finished; },
+  };
+  return out;
 }
 
 async function create(p: ChatParams & { stream: true }): Promise<AsyncIterable<Delta>>;
@@ -144,31 +195,7 @@ async function create(p: ChatParams): Promise<Groq.Chat.ChatCompletion>;
 async function create(p: ChatParams): Promise<Groq.Chat.ChatCompletion | AsyncIterable<Delta>> {
   const params = toAnthropic(p);
   if (p.stream) {
-    const events = await client.messages.create({ ...params, stream: true });
-    // Read up to the first text before returning, so an overload or error that arrives early in the stream
-    // still throws inside withFallback and can move to the other model. Later errors end the stream.
-    const it = events[Symbol.asyncIterator]();
-    const head: Delta[] = [];
-    let done = false;
-    while (!head.length) {
-      const n = await it.next();
-      if (n.done) { done = true; break; }
-      const ev = n.value;
-      if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') head.push({ choices: [{ delta: { content: ev.delta.text } }] });
-    }
-    return (async function* () {
-      // finally closes the request if the reader stops early (client left, deadline hit).
-      try {
-        yield* head;
-        if (done) return;
-        for (let n = await it.next(); !n.done; n = await it.next()) {
-          const ev = n.value;
-          if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') yield { choices: [{ delta: { content: ev.delta.text } }] };
-        }
-      } finally {
-        await it.return?.();
-      }
-    })();
+    return readHead(await client.messages.create({ ...params, stream: true }));
   }
   const r = fromAnthropic(await client.messages.create(params), p.response_format?.type === 'json_object');
   if (forcedToolSkipped(p, r)) throw Object.assign(new Error(`${p.model} skipped the required tool`), { status: 502 });

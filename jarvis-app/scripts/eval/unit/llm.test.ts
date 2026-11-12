@@ -1,4 +1,4 @@
-import { toAnthropic, fromAnthropic, cleanJson, forcedToolSkipped } from '../../../src/lib/llm';
+import { toAnthropic, fromAnthropic, cleanJson, forcedToolSkipped, readHead } from '../../../src/lib/llm';
 let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
 
 const tools = [{ type: 'function' as const, function: { name: 'set_reminder', description: 'Set a reminder', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } } }];
@@ -49,5 +49,57 @@ ok('Sonnet skipping a forced tool is a failure', forcedToolSkipped(forcedP('clau
 ok('Sonnet calling the tool is fine', !forcedToolSkipped(forcedP('claude-sonnet-5-5'), r));
 ok('Haiku forced is enforced by the API, not checked', !forcedToolSkipped(forcedP('claude-haiku-5-5'), noTool));
 ok('auto never fails for skipping', !forcedToolSkipped({ model: 'claude-sonnet-5-5', tools, tool_choice: 'auto', messages: [] }, noTool));
+const otherTool = fromAnthropic({ id: 'm', type: 'message', role: 'assistant', model: 'x', stop_reason: 'tool_use', stop_sequence: null, usage: {} as never,
+  content: [{ type: 'tool_use', id: 'toolu_8', name: 'get_calendar_events', input: {} }] } as never);
+ok('Sonnet calling a different tool than the forced one is a failure', forcedToolSkipped(forcedP('claude-sonnet-5-5'), otherTool));
+ok('required (unnamed) accepts any tool', !forcedToolSkipped({ model: 'claude-sonnet-5-5', tools, tool_choice: 'required', messages: [] }, otherTool));
 
-if (f) { console.error(`${f} failed`); process.exit(1); }
+// Fake Anthropic event stream: yields the given events, optionally throws after `throwAt` of them, records return().
+type Ev = Parameters<typeof readHead>[0] extends AsyncIterable<infer E> ? E : never;
+const txt = (t: string) => ({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: t } }) as unknown as Ev;
+const start = { type: 'message_start' } as unknown as Ev;
+function fake(evs: Ev[], throwAt = -1) {
+  const s = { returned: 0, i: 0 };
+  const iter: AsyncIterator<Ev> = {
+    async next() {
+      if (s.i === throwAt) throw Object.assign(new Error('overloaded'), { status: 529 });
+      return s.i < evs.length ? { done: false, value: evs[s.i++] } : { done: true, value: undefined };
+    },
+    async return() { s.returned++; return { done: true, value: undefined }; },
+  };
+  return { s, src: { [Symbol.asyncIterator]: () => iter } };
+}
+const read = async (it: AsyncIterable<{ choices: { delta: { content?: string } }[] }>) => { let o = ''; for await (const d of it) o += d.choices[0].delta.content ?? ''; return o; };
+
+(async () => {
+  const early = fake([start, txt('hi')], 1);
+  let threw = false;
+  try { await readHead(early.src); } catch { threw = true; }
+  ok('early stream error throws from readHead', threw);
+  ok('early stream error closes the source', early.s.returned === 1);
+
+  const plain = fake([start, txt('Hel'), txt('lo')]);
+  ok('text-only stream reads in full', await read(await readHead(plain.src)) === 'Hello');
+  ok('normal end does not call return() on the source', plain.s.returned === 0);
+
+  const empty = fake([start]);
+  ok('stream with no text yields nothing', await read(await readHead(empty.src)) === '' && empty.s.returned === 0);
+
+  const stop = fake([start, txt('a'), txt('b'), txt('c')]);
+  const it = await readHead(stop.src);
+  await it.next();
+  await it.return?.();
+  await it.return?.();
+  ok('reader stopping early closes the source once', stop.s.returned === 1);
+
+  const unread = fake([start, txt('a'), txt('b')]);
+  await (await readHead(unread.src)).return?.();
+  ok('return() before any read closes the source', unread.s.returned === 1);
+
+  const late = fake([start, txt('a'), txt('b')], 2);
+  let lateThrew = false;
+  try { await read(await readHead(late.src)); } catch { lateThrew = true; }
+  ok('late stream error ends the stream and closes the source', lateThrew && late.s.returned === 1);
+
+  if (f) { console.error(`${f} failed`); process.exit(1); }
+})();
