@@ -15,19 +15,25 @@ import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { getGoogleAccessToken } from '@/lib/google';
 import { insertTodos } from '@/lib/todos/store';
 import { isToolUseFailed } from '@/lib/groqErrors';
+import { llm } from '@/lib/llm';
 
 // Retries are handled here, not in the SDK: a daily-quota 429 carries a wait of many minutes, so the SDK would burn
 // seconds of backoff before we ever reached the fallback.
-export const groq = new Groq({ apiKey: process.env.GROQ_API_KEY, maxRetries: 0, timeout: 20000 });
+// Claude via src/lib/llm.ts (chat-completions shape). Kept under the old name so every caller stays unchanged.
+export const groq = llm;
 
 // Free-tier Groq caps each model at 200k tokens/day (and 8k/minute). A short per-minute limit is waited out once;
 // a daily limit goes straight to a second model with its own quota so Maya keeps answering.
-export const PRIMARY_MODEL = 'qwen/qwen3.8-27b';
-export const FALLBACK_MODEL = 'openai/gpt-oss-120b';
+export const PRIMARY_MODEL = 'claude-haiku-5-5';
+export const FALLBACK_MODEL = 'claude-sonnet-5-5';
 const MAX_WAIT_MS = 12000;
 
 // Groq words the wait as e.g. "7m12.5s", "3.2s" or "250ms".
 function retryWaitMs(e: unknown): number | null {
+  // Anthropic sends the wait as a retry-after header (seconds).
+  const h = (e as { headers?: { get?: (k: string) => string | null } & Record<string, unknown> }).headers;
+  const ra = h ? (typeof h.get === 'function' ? h.get('retry-after') : (h['retry-after'] as string | undefined)) : null;
+  if (ra != null && ra !== '' && !Number.isNaN(Number(ra))) return Number(ra) * 1000;
   const m = /try again in (?:(\d+)m(?!s))?(?:([\d.]+)(ms|s))?/i.exec((e as Error).message ?? '');
   if (!m || (!m[1] && !m[2])) return null;
   const secs = m[2] ? (m[3].toLowerCase() === 'ms' ? Number(m[2]) / 1000 : Number(m[2])) : 0;
