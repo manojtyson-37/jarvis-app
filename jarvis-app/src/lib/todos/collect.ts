@@ -25,7 +25,7 @@ export async function collectEmailTodos(userId: string): Promise<number> {
   for (const q of ['is:starred newer_than:2d', 'from:me to:me newer_than:2d']) {
     const msgs = await fetchMessageSummaries(q, 5, 5);
     for (const m of msgs ?? []) {
-      const key = `todo-mail:${m.id}`;
+      const key = `todo-mail:${userId}:${m.id}`;
       if (m.automated || await sourceSeen(userId, key)) continue;
       // One bad source must not stop the rest; it stays unseen and is retried while it is inside the 2-day window.
       let todos: string[];
@@ -43,7 +43,7 @@ export async function collectMeetingTodos(userId: string): Promise<number> {
   const docs = await listRecentDocsNamed('Notes by Gemini', since, 3);
   let added = 0;
   for (const d of docs ?? []) {
-    const key = `todo-drive:${d.id}`;
+    const key = `todo-drive:${userId}:${d.id}`;
     if (await sourceSeen(userId, key)) continue;
     const text = await readDriveFile(d.id);
     if (/^(Invalid|Drive (?:file lookup|read) failed|Drive not configured)/.test(text)) continue;
