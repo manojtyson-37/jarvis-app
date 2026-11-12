@@ -21,6 +21,7 @@ import { parseTodoCapture } from '@/lib/todos/capture';
 import { insertTodos } from '@/lib/todos/store';
 import { runTodoBatch } from '@/lib/todos/runner';
 import { groq, PRIMARY_MODEL, withFallback, fallbackOpts, TOOLS, executeTool } from '@/lib/chatTools';
+import { shouldRetryToolUseFailed, reportedError } from '@/lib/groqErrors';
 
 // Vercel's default would otherwise cut a long tool-plus-summary turn off with no message.
 // The reply itself is cut at 52s (see the deadline below); the extra time is for the to-do run that follows a capture.
@@ -252,11 +253,31 @@ export async function POST(req: NextRequest) {
             max_tokens: model === PRIMARY_MODEL ? 400 : 700, // the fallback spends some tokens reasoning first
           }));
         } catch (e) {
-          console.error('Groq initial call failed:', (e as Error).message);
-          await finish((e as { status?: number }).status === 429
-            ? "I'm at my rate limit for the moment. Ask again in about a minute."
-            : 'Hit a snag — try again in a moment.');
-          return;
+          // withFallback already moved to the other model once; a tool_use_failed here means that attempt also
+          // wrote a malformed tool call. The output is sampled, so send the same request once more.
+          let failure: unknown = e;
+          let retried: Groq.Chat.ChatCompletion | null = null;
+          if (shouldRetryToolUseFailed(e, Date.now() - startedAt)) {
+            console.warn('Groq initial call hit tool_use_failed, retrying once:', (e as Error).message?.slice(0, 200));
+            path.push('tool-retry');
+            try {
+              retried = await groq.chat.completions.create({
+                model: PRIMARY_MODEL,
+                messages: [{ role: 'system', content: buildSystemPrompt(memoryFacts, ruleTexts) }, ...msgs],
+                tools: turnTools,
+                tool_choice: forcedToolChoice,
+                max_tokens: 400,
+              });
+            } catch (e2) { failure = reportedError(e, e2); }
+          }
+          if (!retried) {
+            console.error('Groq initial call failed:', (failure as Error).message);
+            await finish((failure as { status?: number }).status === 429
+              ? "I'm at my rate limit for the moment. Ask again in about a minute."
+              : 'Hit a snag — try again in a moment.');
+            return;
+          }
+          response = retried;
         }
 
         // Last resort for a routing miss: the model answered an action-sounding message without calling any tool

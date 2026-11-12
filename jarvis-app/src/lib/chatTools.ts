@@ -14,6 +14,7 @@ import { searchDrive, readDriveFile } from '@/lib/drive';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { getGoogleAccessToken } from '@/lib/google';
 import { insertTodos } from '@/lib/todos/store';
+import { isToolUseFailed } from '@/lib/groqErrors';
 
 // Retries are handled here, not in the SDK: a daily-quota 429 carries a wait of many minutes, so the SDK would burn
 // seconds of backoff before we ever reached the fallback.
@@ -44,7 +45,7 @@ export async function withFallback<T>(call: (model: string) => Promise<T>, start
     return await call(PRIMARY_MODEL);
   } catch (e) {
     // The primary model sometimes returns nothing under a forced tool choice ("tool_use_failed"); the other model copes.
-    if ((e as { status?: number }).status === 400 && /tool_use_failed/.test((e as Error).message ?? '')) {
+    if (isToolUseFailed(e)) {
       console.warn('primary model failed to call the forced tool, using fallback model:', (e as Error).message?.slice(0, 200));
       return call(FALLBACK_MODEL);
     }

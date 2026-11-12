@@ -1,0 +1,21 @@
+import { isToolUseFailed, shouldRetryToolUseFailed, reportedError, TOOL_RETRY_MAX_ELAPSED_MS } from '../../../src/lib/groqErrors';
+let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
+const err = (status: number | undefined, message: string, body?: unknown) => Object.assign(new Error(message), { status, error: body });
+const hdfc = err(400, '400 {"error":{"message":"Failed to call a function. Please adjust your prompt.","type":"invalid_request_error","code":"tool_use_failed","failed_generation":"<function=web_search>< parameter=\\"query\\">HDFC bank"}}');
+
+ok('real 2026-11-11 HDFC error is tool_use_failed', isToolUseFailed(hdfc));
+ok('code in parsed body only', isToolUseFailed(err(400, '400 Bad Request', { error: { code: 'tool_use_failed' } })));
+ok('other 400 is not', !isToolUseFailed(err(400, '400 {"error":{"code":"context_length_exceeded"}}')));
+ok('429 mentioning tool_use_failed is not', !isToolUseFailed(err(429, 'rate limit tool_use_failed')));
+ok('5xx is not', !isToolUseFailed(err(503, 'over capacity')));
+ok('no status is not', !isToolUseFailed(err(undefined, 'tool_use_failed')));
+ok('null / string / undefined are not', !isToolUseFailed(null) && !isToolUseFailed('tool_use_failed') && !isToolUseFailed(undefined));
+ok('retry early in the turn', shouldRetryToolUseFailed(hdfc, 3000));
+ok('no retry near the deadline', !shouldRetryToolUseFailed(hdfc, TOOL_RETRY_MAX_ELAPSED_MS));
+ok('no retry for other errors', !shouldRetryToolUseFailed(err(500, 'boom'), 1000));
+const rl = err(429, 'rate limit');
+ok('retry 429 after tool_use_failed reports the tool failure', reportedError(hdfc, rl) === hdfc);
+ok('retry tool_use_failed again reports the retry error', reportedError(hdfc, hdfc) === hdfc);
+ok('retry 500 reports the retry error', (reportedError(hdfc, err(500, 'x')) as { status: number }).status === 500);
+ok('both 429 reports rate limit', reportedError(rl, rl) === rl);
+process.exit(f ? 1 : 0);
