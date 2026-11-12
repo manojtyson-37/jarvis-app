@@ -1,4 +1,4 @@
-import { toAnthropic, fromAnthropic, cleanJson } from '../../../src/lib/llm';
+import { toAnthropic, fromAnthropic, cleanJson, forcedToolSkipped } from '../../../src/lib/llm';
 let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
 
 const tools = [{ type: 'function' as const, function: { name: 'set_reminder', description: 'Set a reminder', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } } }];
@@ -42,5 +42,12 @@ const r = fromAnthropic({ id: 'm', type: 'message', role: 'assistant', model: 'c
 ok('tool_use maps to tool_calls', r.choices[0].finish_reason === 'tool_calls' && r.choices[0].message.tool_calls?.[0].function.arguments === '{"text":"call Priya"}');
 ok('text kept', r.choices[0].message.content === 'Setting it.');
 ok('fenced json cleaned', cleanJson('```json\n{"a":1}\n```') === '{"a":1}');
+
+const noTool = fromAnthropic({ id: 'm', type: 'message', role: 'assistant', model: 'x', stop_reason: 'end_turn', stop_sequence: null, usage: {} as never, content: [{ type: 'text', text: 'You have 3 unread.' }] } as never);
+const forcedP = (model: string) => ({ model, tools, tool_choice: { type: 'function' as const, function: { name: 'set_reminder' } }, messages: [] });
+ok('Sonnet skipping a forced tool is a failure', forcedToolSkipped(forcedP('claude-sonnet-5-5'), noTool));
+ok('Sonnet calling the tool is fine', !forcedToolSkipped(forcedP('claude-sonnet-5-5'), r));
+ok('Haiku forced is enforced by the API, not checked', !forcedToolSkipped(forcedP('claude-haiku-5-5'), noTool));
+ok('auto never fails for skipping', !forcedToolSkipped({ model: 'claude-sonnet-5-5', tools, tool_choice: 'auto', messages: [] }, noTool));
 
 if (f) { console.error(`${f} failed`); process.exit(1); }

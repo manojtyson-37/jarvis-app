@@ -131,20 +131,48 @@ type Delta = { choices: { delta: { content?: string } }[] };
 // well inside the chat route's 52s turn deadline.
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0, timeout: 20000 });
 
+// A forced read tool exists to stop the model answering from memory. On a model that cannot be forced (Sonnet 5.5)
+// the force becomes a hint; if the model still skips the tool, fail the call rather than return a made-up answer.
+export function forcedToolSkipped(p: ChatParams, r: Groq.Chat.ChatCompletion): boolean {
+  const tc = p.tool_choice;
+  const forced = tc === 'required' || (!!tc && typeof tc === 'object' && tc.type === 'function');
+  return forced && !forcedToolAllowed(p.model) && !(r.choices[0]?.message?.tool_calls?.length);
+}
+
 async function create(p: ChatParams & { stream: true }): Promise<AsyncIterable<Delta>>;
 async function create(p: ChatParams): Promise<Groq.Chat.ChatCompletion>;
 async function create(p: ChatParams): Promise<Groq.Chat.ChatCompletion | AsyncIterable<Delta>> {
   const params = toAnthropic(p);
   if (p.stream) {
     const events = await client.messages.create({ ...params, stream: true });
+    // Read up to the first text before returning, so an overload or error that arrives early in the stream
+    // still throws inside withFallback and can move to the other model. Later errors end the stream.
+    const it = events[Symbol.asyncIterator]();
+    const head: Delta[] = [];
+    let done = false;
+    while (!head.length) {
+      const n = await it.next();
+      if (n.done) { done = true; break; }
+      const ev = n.value;
+      if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') head.push({ choices: [{ delta: { content: ev.delta.text } }] });
+    }
     return (async function* () {
-      for await (const ev of events) {
-        if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') yield { choices: [{ delta: { content: ev.delta.text } }] };
+      // finally closes the request if the reader stops early (client left, deadline hit).
+      try {
+        yield* head;
+        if (done) return;
+        for (let n = await it.next(); !n.done; n = await it.next()) {
+          const ev = n.value;
+          if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') yield { choices: [{ delta: { content: ev.delta.text } }] };
+        }
+      } finally {
+        await it.return?.();
       }
     })();
   }
-  const r = await client.messages.create(params);
-  return fromAnthropic(r, p.response_format?.type === 'json_object');
+  const r = fromAnthropic(await client.messages.create(params), p.response_format?.type === 'json_object');
+  if (forcedToolSkipped(p, r)) throw Object.assign(new Error(`${p.model} skipped the required tool`), { status: 502 });
+  return r;
 }
 
 export const llm = { chat: { completions: { create } } };
