@@ -387,7 +387,8 @@ export async function isGmailMessageSeen(messageId: string): Promise<boolean> {
 
 export async function markGmailMessageSeen(userId: string, messageId: string) {
   const { error } = await supabase
-    .from('gmail_messages_seen').insert({ message_id: messageId, user_id: userId });
+    .from('gmail_messages_seen')
+    .upsert({ message_id: messageId, user_id: userId }, { onConflict: 'message_id', ignoreDuplicates: true });
   if (error) throw error;
 }
 
