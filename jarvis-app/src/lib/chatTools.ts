@@ -16,6 +16,7 @@ import { getGoogleAccessToken } from '@/lib/google';
 import { insertTodos } from '@/lib/todos/store';
 import { isToolUseFailed } from '@/lib/groqErrors';
 import { llm } from '@/lib/llm';
+import { parseSlotArgs, freeSlots, formatSlots, type Interval } from '@/lib/agent/slots';
 
 // Retries are handled here, not in the SDK: a daily-quota 429 carries a wait of many minutes, so the SDK would burn
 // seconds of backoff before we ever reached the fallback.
@@ -201,6 +202,22 @@ export const TOOLS: Groq.Chat.ChatCompletionTool[] = [
       name: 'get_calendar_events',
       description: 'Get upcoming Google Calendar events. Use when asked about schedule, meetings, calendar, or what\'s coming up.',
       parameters: { type: 'object', properties: { days: { type: 'number', description: 'Number of days ahead to look (default 7)' } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_free_slots',
+      description: "Find free slots in Manoj's Google Calendar on weekdays 10:00-18:00 IST between two dates. Use this (not get_calendar_events) to pick a time for a new meeting. Returns slot start/end as ISO times ready for create_calendar_event.",
+      parameters: {
+        type: 'object',
+        properties: {
+          from_date: { type: 'string', description: 'First day to search, YYYY-MM-DD (IST)' },
+          to_date: { type: 'string', description: 'Last day to search, YYYY-MM-DD (IST), at most 14 days after from_date' },
+          duration_minutes: { type: 'number', description: 'Meeting length in minutes (default 30)' },
+        },
+        required: ['from_date', 'to_date'],
+      },
     },
   },
   {
@@ -513,6 +530,23 @@ export async function executeTool(name: string, args: Record<string, unknown>, u
         const d = start ? new Date(start).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' }) : '';
         return `• [${e.id}] ${e.summary} — ${d}${e.description ? `\n  ${e.description.slice(0, 80)}` : ''}`;
       }).join('\n');
+    }
+
+    case 'find_free_slots': {
+      const p = parseSlotArgs(args);
+      if ('error' in p) return p.error;
+      const token = await getGoogleAccessToken();
+      if (!token) return 'Google Calendar not configured.';
+      const res = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeMin: `${p.from}T00:00:00+05:30`, timeMax: `${p.to}T23:59:59+05:30`, timeZone: 'Asia/Kolkata', items: [{ id: 'primary' }] }),
+      });
+      if (!res.ok) return `Calendar free/busy lookup failed: ${res.status}`;
+      const fb = await res.json() as { calendars?: { primary?: { busy?: Interval[]; errors?: unknown[] } } };
+      const cal = fb.calendars?.primary;
+      if (!cal || cal.errors?.length) return 'Calendar free/busy lookup failed.';
+      return formatSlots(freeSlots(cal.busy ?? [], p.from, p.to, p.minutes, { now: new Date() }), p.minutes);
     }
 
     case 'get_meeting_notes': {

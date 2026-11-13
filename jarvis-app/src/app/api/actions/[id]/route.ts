@@ -1,5 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse, after } from 'next/server';
 import { decideAction } from '@/lib/actions';
+import { resumeRunsForAction } from '@/lib/agent/runner';
+
+export const maxDuration = 300;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -20,6 +23,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   try {
     const result = await decideAction('manoj', id, body.decision, body.hash);
+    // A goal run paused on this action continues right after the reply (the cron sweep is the backup).
+    after(() => resumeRunsForAction('manoj', id).catch(e => console.error('[agent] resume after decision failed:', (e as Error).message)));
     return NextResponse.json(result, { status: result.ok ? 200 : 409 });
   } catch (e) {
     console.error('decideAction failed:', (e as Error).message);
