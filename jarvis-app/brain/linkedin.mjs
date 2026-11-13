@@ -100,6 +100,7 @@ export class LinkedInInbox {
       const r = await this.d.worker('poll', []);
       if (r.code === 3) { await this.authLost(); return 'auth'; }
       if (r.code !== 0) { this.d.log('linkedin poll failed', r.out?.error); return 'error'; }
+      if (r.out.skipped > 0) this.d.log(`linkedin poll skipped ${r.out.skipped} thread(s) this round`);
       const groups = groupByConversation(r.out.messages ?? []);
       this.sweep();
       let shown = 0;

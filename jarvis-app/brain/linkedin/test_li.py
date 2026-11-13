@@ -108,11 +108,11 @@ class Parsing(unittest.TestCase):
 
     def test_messages(self):
         payload = {"included": [
-            {"$type": "com.linkedin.messenger.Message", "entityUrn": "urn:li:msg_message:1", "deliveredAt": str(NOW),
+            {"$type": "com.linkedin.messenger.Message", "entityUrn": "urn:li:msg_message:1", "conversationUrn": CONV, "deliveredAt": str(NOW),
              "senderUrn": "urn:li:msg_messagingParticipant:urn:li:fsd_profile:PUSHPITA00000", "subject": "Hiring PM",
              "body": {"text": "Please share your CV"}},
-            {"$type": "com.linkedin.messenger.Message", "entityUrn": "urn:li:msg_message:2", "body": {"text": "  "}},
-            {"$type": "com.linkedin.messenger.Message", "entityUrn": "urn:li:msg_message:3", "body": {"text": "no sender"}},
+            {"$type": "com.linkedin.messenger.Message", "entityUrn": "urn:li:msg_message:2", "conversationUrn": CONV, "body": {"text": "  "}},
+            {"$type": "com.linkedin.messenger.Message", "entityUrn": "urn:li:msg_message:3", "conversationUrn": CONV, "body": {"text": "no sender"}},
         ]}
         out = li.parse_messages(payload, CONV, "Pushpita Mazumdar")
         self.assertEqual(len(out), 1)
@@ -121,8 +121,73 @@ class Parsing(unittest.TestCase):
         self.assertEqual(out[0]["at"], NOW)
         self.assertEqual(out[0]["sender"], "Pushpita Mazumdar")
 
+    def test_messages_from_other_threads_are_dropped(self):
+        other = CONV.replace("ZjE2", "T1RI")
+        mk = lambda i, conv: {"$type": "com.linkedin.messenger.Message", "entityUrn": f"urn:li:msg_message:{i}",
+                              "senderUrn": "urn:li:fsd_profile:PUSHPITA00000", "body": {"text": "hi"}, **conv}
+        payload = {"included": [mk(1, {"conversationUrn": CONV}), mk(2, {"conversationUrn": other}), mk(3, {})]}
+        self.assertEqual([m["id"] for m in li.parse_messages(payload, CONV, "t")], ["urn:li:msg_message:1"])
+
+    def _session(self, replies):
+        """Session whose get() answers by query type: a dict payload, or an exception to raise."""
+        s = li.Session.__new__(li.Session)
+        calls = []
+        def get(path, accept=None):
+            kind = "sync" if "q=syncToken" in path else "conv"
+            calls.append(kind)
+            r = replies[kind]
+            if isinstance(r, Exception):
+                raise r
+            return r
+        s.get = get
+        return s, calls
+
+    def _msg(self, i):
+        return {"$type": "com.linkedin.messenger.Message", "entityUrn": f"urn:li:msg_message:{i}", "conversationUrn": CONV,
+                "senderUrn": "urn:li:fsd_profile:PUSHPITA00000", "body": {"text": f"m{i}"}, "deliveredAt": NOW + i}
+
+    def test_sync_failure_falls_back_to_short_thread(self):
+        s, calls = self._session({"sync": RuntimeError("linkedin status 500"), "conv": {"included": [self._msg(1), self._msg(2)]}})
+        self.assertEqual(len(s.messages(CONV, "t")), 2)
+        self.assertEqual(calls, ["sync", "conv"])
+
+    def test_sync_failure_with_long_thread_raises_not_stale(self):
+        page = {"included": [self._msg(i) for i in range(li.FALLBACK_PAGE)]}
+        s, _ = self._session({"sync": RuntimeError("linkedin status 500"), "conv": page})
+        with self.assertRaises(RuntimeError):
+            s.messages(CONV, "t")
+
+    def test_empty_sync_does_not_reread_oldest(self):
+        s, calls = self._session({"sync": {"included": []}, "conv": {"included": [self._msg(1)]}})
+        self.assertEqual(s.messages(CONV, "t"), [])
+        self.assertEqual(calls, ["sync"])
+
+    def test_sync_auth_error_is_not_swallowed(self):
+        s, calls = self._session({"sync": li.AuthError("status 401"), "conv": {"included": [self._msg(1)]}})
+        with self.assertRaises(li.AuthError):
+            s.messages(CONV, "t")
+        self.assertEqual(calls, ["sync"])
+
+    def test_poll_reports_skipped_threads(self):
+        class S:
+            def me_urn(self): return "urn:li:fsd_profile:MEMEMEMEMEMEMEME"
+            def conversations(self): return [{"conversation": CONV, "title": "t", "at": NOW}]
+            def messages(self, c, t): raise RuntimeError("linkedin status 500")
+            def name(self, u): return ""
+        with tempfile.TemporaryDirectory() as d:
+            old = li.SEEN_FILE; li.SEEN_FILE = os.path.join(d, "s.json")
+            import io, contextlib
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    li.cmd_poll(S())
+            finally:
+                li.SEEN_FILE = old
+        out = json.loads(buf.getvalue().strip().splitlines()[-1])
+        self.assertEqual(out, {"messages": [], "skipped": 1})
+
     def test_text_capped(self):
-        payload = {"included": [{"$type": "com.linkedin.messenger.Message", "entityUrn": "u", "senderUrn": "urn:li:fsd_profile:X", "body": {"text": "x" * 20000}}]}
+        payload = {"included": [{"$type": "com.linkedin.messenger.Message", "entityUrn": "u", "conversationUrn": CONV, "senderUrn": "urn:li:fsd_profile:X", "body": {"text": "x" * 20000}}]}
         self.assertEqual(len(li.parse_messages(payload, CONV, "t")[0]["text"]), li.MAX_TEXT)
 
     def test_profile_name(self):

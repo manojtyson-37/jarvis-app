@@ -30,6 +30,7 @@ PARTICIPANT = "urn:li:msg_messagingParticipant:"
 BOOTSTRAP_DAYS = 14   # first run: surface unanswered inbound threads newer than this
 BOOTSTRAP_MAX = 5
 MAX_TEXT = 8000       # LinkedIn's own limit is 8000 characters
+FALLBACK_PAGE = 20    # q=conversation page size; a full page means the newest are missing
 SEEN_CAP = 5000
 JSON_ACCEPT = "application/vnd.linkedin.normalized+json+2.1"
 
@@ -72,10 +73,14 @@ def parse_conversations(payload: dict):
 
 
 def parse_messages(payload: dict, conv: str, title: str):
-    """Dash messengerMessages (q=conversation) -> [{id, conversation, sender, sender_urn, text, at}]."""
+    """Dash messengerMessages (q=syncToken or q=conversation) -> [{id, conversation, sender, sender_urn, text, at}].
+    Only messages that name `conv` as their own conversation: a draft must never go to a thread
+    the message didn't come from, so a missing or different conversationUrn is dropped."""
     out = []
     for m in (payload or {}).get("included") or []:
         if m.get("$type") != "com.linkedin.messenger.Message":
+            continue
+        if m.get("conversationUrn") != conv:
             continue
         text = ((m.get("body") or {}).get("text")) or ""
         mid = m.get("entityUrn")
@@ -231,13 +236,21 @@ class Session:
         if not CONV_URN.match(conv):
             raise ValueError("bad conversation id")
         # q=syncToken returns the NEWEST messages. q=conversation pages from the OLDEST (verified live
-        # 2026-11-13: a long thread's 20 came back from 2023-2024), so it is only a fallback.
-        d = self.get(f"/voyagerMessagingDashMessengerMessages?q=syncToken&conversationUrn={enc(conv)}", JSON_ACCEPT)
-        msgs = parse_messages(d, conv, title)
-        if not msgs:
-            d = self.get(f"/voyagerMessagingDashMessengerMessages?q=conversation&conversationUrn={enc(conv)}&count=20", JSON_ACCEPT)
-            msgs = parse_messages(d, conv, title)
-        return msgs
+        # 2026-11-13: a long thread's 20 came back from 2023-2024), so it is only a fallback when
+        # syncToken itself fails. An empty syncToken answer (e.g. attachments only) is trusted as-is:
+        # re-reading from the oldest end there would resurface stale messages.
+        try:
+            d = self.get(f"/voyagerMessagingDashMessengerMessages?q=syncToken&conversationUrn={enc(conv)}", JSON_ACCEPT)
+            return parse_messages(d, conv, title)
+        except RuntimeError:
+            pass  # AuthError is not a RuntimeError: it is not retried via the fallback (cmd_poll counts it as skipped)
+        d = self.get(f"/voyagerMessagingDashMessengerMessages?q=conversation&conversationUrn={enc(conv)}"
+                     f"&count={FALLBACK_PAGE}", JSON_ACCEPT)
+        raw = [m for m in (d or {}).get("included") or [] if m.get("$type") == "com.linkedin.messenger.Message"]
+        if len(raw) >= FALLBACK_PAGE:
+            # A full page from the oldest end means the thread is longer and its newest are missing.
+            raise RuntimeError("thread longer than one fallback page; newest messages not visible")
+        return parse_messages(d, conv, title)
 
     def send(self, conv, text):
         if not CONV_URN.match(conv):
@@ -277,11 +290,13 @@ def cmd_poll(s):
     convs = s.conversations()
     bootstrap = not st["bootstrapped"]
     now = int(time.time() * 1000)
-    msgs, visible, quiet = [], [], []
+    msgs, visible, quiet, skipped, failed = [], [], [], 0, set()
     for c in changed_threads(convs, st["threads"], bootstrap, now):
         try:
             cand, ids = thread_candidates(s.messages(c["conversation"], c["title"]), me)
         except (RuntimeError, AuthError):
+            skipped += 1  # reported in the output so the bridge logs it
+            failed.add(c["conversation"])
             continue  # one refused thread is not a dead session; it retries next poll
         time.sleep(1)  # gentle pacing between thread reads
         visible += ids
@@ -299,7 +314,7 @@ def cmd_poll(s):
         keep = {m["id"] for m in new}
         st["ids"] += [i for i in dict.fromkeys(visible) if i not in keep and i not in seen]
         for c in convs:  # old threads: start watching from their current activity
-            if c["conversation"] not in shown:
+            if c["conversation"] not in shown and c["conversation"] not in failed:  # unread: retry next poll
                 st["threads"].setdefault(c["conversation"], c["at"])
         st["bootstrapped"] = True
     names = st.setdefault("names", {})
@@ -311,7 +326,7 @@ def cmd_poll(s):
                 names[urn] = n
         m["sender"] = names.get(urn) or m["sender"]
     save_seen(st)
-    print(json.dumps({"messages": new}))
+    print(json.dumps({"messages": new, "skipped": skipped}))
 
 
 def cmd_send(s):
