@@ -12,6 +12,7 @@ import { parseReminderTime } from '@/lib/timeparser';
 import { listRecentEmails, getEmail, listLabels } from '@/lib/gmail';
 import { searchDrive, readDriveFile } from '@/lib/drive';
 import { GATED_TOOLS, queueAction } from '@/lib/actions';
+import { JOB_TOOLS, JOB_TOOL_NAMES, runJobTool } from '@/lib/jobs/tools';
 import { getGoogleAccessToken } from '@/lib/google';
 import { insertTodos } from '@/lib/todos/store';
 import { isToolUseFailed } from '@/lib/groqErrors';
@@ -363,12 +364,14 @@ export const TOOLS: Groq.Chat.ChatCompletionTool[] = [
       },
     },
   },
+  ...JOB_TOOLS,
 ];
 
 export async function executeTool(name: string, args: Record<string, unknown>, userId: string): Promise<string> {
   // Tiered approval: outward-facing/irreversible tools never run here — they are queued and
   // only the session-gated /api/actions/[id] endpoint can execute them.
   if (GATED_TOOLS.has(name)) return queueAction(userId, name, args);
+  if (JOB_TOOL_NAMES.has(name)) return runJobTool(name, args, userId);
   switch (name) {
     case 'save_note':
       await saveNote(userId, args.content as string, (args.tags as string[]) ?? []);
