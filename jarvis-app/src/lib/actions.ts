@@ -122,6 +122,14 @@ async function lookupEventTitle(eventId: string): Promise<string> {
 export async function queueAction(
   userId: string, tool: string, rawArgs: Record<string, unknown>,
 ): Promise<string> {
+  return (await queueActionWithId(userId, tool, rawArgs)).message;
+}
+
+// Same as queueAction, plus the pending_actions row id (an identical request already waiting returns that row's id),
+// so the agent loop can pause on exactly this row and resume when it is decided.
+export async function queueActionWithId(
+  userId: string, tool: string, rawArgs: Record<string, unknown>,
+): Promise<{ message: string; id: string | null; fresh: boolean }> {
   let input = rawArgs;
   if (tool === 'delete_calendar_event') {
     // Resolve the title now so the user approves "Delete 'Standup'", not an opaque ID.
@@ -129,15 +137,15 @@ export async function queueAction(
     input = { event_id: rawArgs.event_id, event_title: await lookupEventTitle(str(rawArgs.event_id).trim()) };
   }
   const v = validateGatedArgs(tool, input);
-  if (!v.ok) return `Not queued: ${v.error}`;
+  if (!v.ok) return { message: `Not queued: ${v.error}`, id: null, fresh: false };
 
   const nowIso = new Date().toISOString();
   const { data: open, error: openErr } = await supabase
-    .from('pending_actions').select('tool, args')
+    .from('pending_actions').select('id, tool, args')
     .eq('user_id', userId).eq('status', 'pending').gt('expires_at', nowIso);
   if (openErr) {
     console.error('queueAction pending lookup failed:', openErr.message);
-    return 'Could not queue that action. Nothing was done.';
+    return { message: 'Could not queue that action. Nothing was done.', id: null, fresh: false };
   }
   // jsonb returns keys in its own order, so compare after re-running each stored row through the
   // validator, which always rebuilds args in one fixed key order.
@@ -148,12 +156,12 @@ export async function queueAction(
   const wanted = sig(tool, v.args);
   // Rows for tools that no longer exist (the removed Freshdesk actions) never show on a card and can never run,
   // so they must not count toward the cap either.
-  const liveSigs = (open ?? []).filter(r => GATED_TOOLS.has(r.tool as string))
-    .map(r => sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>)).filter(Boolean);
-  const dupe = liveSigs.includes(wanted);
-  if (dupe) return `Already waiting for your approval: ${v.summary}.`;
-  if (liveSigs.length >= MAX_PENDING) {
-    return `Not queued: ${MAX_PENDING} actions are already waiting for approval. Approve or cancel some first.`;
+  const live = (open ?? []).filter(r => GATED_TOOLS.has(r.tool as string))
+    .map(r => ({ id: r.id as string, sig: sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>) })).filter(r => r.sig);
+  const dupe = live.find(r => r.sig === wanted);
+  if (dupe) return { message: `Already waiting for your approval: ${v.summary}.`, id: dupe.id, fresh: false };
+  if (live.length >= MAX_PENDING) {
+    return { message: `Not queued: ${MAX_PENDING} actions are already waiting for approval. Approve or cancel some first.`, id: null, fresh: false };
   }
 
   const { data, error } = await supabase
@@ -163,13 +171,14 @@ export async function queueAction(
     .single();
   if (error || !data) {
     console.error('queueAction failed:', error?.message);
-    return 'Could not queue that action. Nothing was done.';
+    return { message: 'Could not queue that action. Nothing was done.', id: null, fresh: false };
   }
   await logTaskExecution(userId, auditType(tool), `Queued for approval: ${v.summary}`, { pending_action_id: data.id, status: 'pending_approval' });
   const longText = (str(v.args.body) || str(v.args.note) || str(v.args.description)).length > EXCERPT;
-  return longText
+  const message = longText
     ? `Waiting for your approval: ${v.summary}. It has long text — open Full text on the card, then tap Approve (or "cancel" to drop it).`
     : `Waiting for your approval: ${v.summary}. Say "approve" or tap Approve to do it, "cancel" to drop it.`;
+  return { message, id: data.id as string, fresh: true };
 }
 
 export async function listPendingActions(userId: string): Promise<PendingAction[]> {
@@ -296,4 +305,16 @@ export async function decideAction(
   } catch (e) {
     return finish(false, `Action failed: ${(e as Error).message}`);
   }
+}
+
+// Read-only status of one queued action, for the agent loop to resume a paused step. `expired` covers a row still
+// marked pending after its expiry (nothing has swept it yet): it can never be approved any more.
+export async function getActionStatus(
+  userId: string, id: string,
+): Promise<{ status: string; result: string | null; expired: boolean } | null> {
+  const { data, error } = await supabase.from('pending_actions')
+    .select('status, result, expires_at').eq('id', id).eq('user_id', userId).maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return { status: data.status as string, result: (data.result as string | null) ?? null, expired: Date.parse(data.expires_at as string) < Date.now() };
 }

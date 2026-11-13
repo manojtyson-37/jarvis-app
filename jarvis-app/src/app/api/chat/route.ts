@@ -20,6 +20,8 @@ import { handleAwayIntent } from '@/lib/away/chat';
 import { parseTodoCapture } from '@/lib/todos/capture';
 import { insertTodos } from '@/lib/todos/store';
 import { runTodoBatch } from '@/lib/todos/runner';
+import { parseGoalIntent, parseCancelGoal } from '@/lib/agent/intent';
+import { startAgentRun, runAgent, cancelAgentRuns } from '@/lib/agent/runner';
 import { groq, PRIMARY_MODEL, withFallback, fallbackOpts, TOOLS, executeTool } from '@/lib/chatTools';
 import { shouldRetryToolUseFailed, reportedError } from '@/lib/groqErrors';
 
@@ -130,6 +132,18 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // A multi-step goal ("find a slot next week, draft an invite and email, then send it"): saved as an agent run and
+  // worked through in the background after the reply goes out. To-do lists and standing rules keep their own paths.
+  const goal = !todoCapture && !parseStandingInstruction(message) ? parseGoalIntent(message) : null;
+  let runStarted: Promise<{ id: string } | { error: string }> | null = null;
+  if (goal) {
+    runStarted = startAgentRun(userId, goal, 'chat');
+    after(async () => {
+      const r = await runStarted!.catch(() => null);
+      if (r && 'id' in r) await runAgent(userId, r.id, 240_000).catch(e => console.error('[agent] run after chat failed:', (e as Error).message));
+    });
+  }
+
   const encoder = new TextEncoder();
   const sseChunk = (text: string) => encoder.encode(`data: ${JSON.stringify({ chunk: text })}\n\n`);
   const sseDone = () => encoder.encode('data: [DONE]\n\n');
@@ -181,6 +195,23 @@ export async function POST(req: NextRequest) {
           await finish(n
             ? `Got ${n === 1 ? 'it' : `${n} to-dos`}, Manoj:\n${todoCapture.items.map(t => `• ${t}`).join('\n')}\n\nI'll start on the ones I can do now and report back here. Anything that sends, books or deletes will wait for your Approve; money and passwords stay with you.`
             : "Sorry, Manoj, I couldn't save those to-dos just now. Please send them again in a moment.");
+          return;
+        }
+
+        if (parseCancelGoal(message)) {
+          path.push('agent-cancel');
+          await finish(await cancelAgentRuns(userId).catch(e => { console.error('[chat] cancel failed:', (e as Error).message); return "Sorry, Manoj, I couldn't stop it just now. Please try again."; }));
+          return;
+        }
+
+        if (goal && runStarted) {
+          path.push('agent');
+          const r = await runStarted.catch(e => { console.error('[chat] agent run not started:', (e as Error).message); return null; });
+          await finish(!r
+            ? "Sorry, Manoj, I couldn't start on that just now. Please send it again in a moment."
+            : 'error' in r
+              ? `Not started: ${r.error}`
+              : `On it, Manoj. I'll work through this in the background and message you the plan in a moment:\n${goal}\n\nAnything that sends an email or changes your calendar comes to you for approval first.`);
           return;
         }
 

@@ -20,14 +20,16 @@ export async function searchDrive(query: string, maxResults = 10): Promise<strin
   const params = new URLSearchParams({
     q: `(name contains '${escaped}' or fullText contains '${escaped}') and trashed = false`,
     pageSize: String(Math.min(Math.max(maxResults, 1), 25)),
-    fields: 'files(id,name,mimeType,modifiedTime)',
+    fields: 'files(id,name,mimeType,modifiedTime,webViewLink)',
     orderBy: 'modifiedTime desc',
   });
   const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) return `Drive search failed: ${res.status}`;
-  const data = await res.json() as { files?: { id: string; name: string; mimeType: string; modifiedTime: string }[] };
+  const data = await res.json() as { files?: { id: string; name: string; mimeType: string; modifiedTime: string; webViewLink?: string }[] };
   if (!data.files?.length) return `No Drive files found for "${q}".`;
-  return data.files.map(f => `${f.name} [${f.mimeType.replace('application/vnd.google-apps.', 'google-')}] modified ${f.modifiedTime.slice(0, 10)} — id: ${f.id}`).join('\n');
+  // The link is what an email can carry instead of an attachment; only Google's own https link is shown.
+  const link = (u?: string) => (u && /^https:\/\/(docs|drive)\.google\.com\/[^\s<>"']+$/.test(u) ? ` — link: ${u}` : '');
+  return data.files.map(f => `${f.name} [${f.mimeType.replace('application/vnd.google-apps.', 'google-')}] modified ${f.modifiedTime.slice(0, 10)} — id: ${f.id}${link(f.webViewLink)}`).join('\n');
 }
 
 export async function readDriveFile(fileId: string): Promise<string> {
