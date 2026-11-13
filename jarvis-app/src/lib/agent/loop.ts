@@ -45,7 +45,7 @@ export type Outcome =
   | { kind: 'waiting'; summary: string; fresh: boolean } // fresh = queued in this call (notify once)
   | { kind: 'paused' }                                   // out of time this invocation; the cron continues it
   | { kind: 'failed'; reason: string }
-  | { kind: 'lost' };
+  | { kind: 'lost'; orphanAction?: string }; // orphanAction: queued but never recorded on the run — reject it
 
 export const newState = (goal: string, plan: string[]): RunState => ({
   goal, plan, messages: [], rounds: 0, steps: 0, privateRead: false, seenUrls: urlsIn(goal).map(clean), waiting: null,
@@ -140,7 +140,7 @@ export async function advance(state: RunState, deps: Deps, budgetMs: number): Pr
             await deps.stepEnd(stepId, 'waiting_approval', q.message, q.actionId);
             state.waiting = { stepId, toolCallId: tc.id, actionId: q.actionId, summary: q.message };
             freshSummary = q.message;
-            if (!(await deps.checkpoint(state))) return { kind: 'lost' };
+            if (!(await deps.checkpoint(state))) return { kind: 'lost', orphanAction: q.actionId };
             continue; // its tool result is added when Manoj decides
           }
           await deps.stepEnd(stepId, 'failed', q.message);

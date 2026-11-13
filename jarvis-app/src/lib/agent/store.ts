@@ -98,9 +98,17 @@ export async function cancelActiveRuns(userId: string): Promise<{ count: number;
     .update({ status: 'cancelled', result: 'Cancelled by Manoj.', lease_owner: null, lease_until: null, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     .eq('user_id', userId).in('status', ACTIVE).select('id, state');
   if (error) throw error;
-  const actionIds = (data ?? []).map(r => ((r.state ?? {}) as { waiting?: { actionId?: unknown } }).waiting?.actionId)
-    .filter((a): a is string => typeof a === 'string');
-  return { count: data?.length ?? 0, actionIds };
+  const ids = new Set((data ?? []).map(r => ((r.state ?? {}) as { waiting?: { actionId?: unknown } }).waiting?.actionId)
+    .filter((a): a is string => typeof a === 'string'));
+  // Also any card queued by a worker that had not checkpointed it yet (the step row is written first).
+  const runIds = (data ?? []).map(r => r.id as string);
+  if (runIds.length) {
+    const { data: steps, error: sErr } = await supabase.from('agent_steps')
+      .select('pending_action_id').in('run_id', runIds).eq('status', 'waiting_approval').not('pending_action_id', 'is', null);
+    if (sErr) throw sErr;
+    for (const s of steps ?? []) ids.add(s.pending_action_id as string);
+  }
+  return { count: data?.length ?? 0, actionIds: [...ids] };
 }
 
 export async function insertStep(

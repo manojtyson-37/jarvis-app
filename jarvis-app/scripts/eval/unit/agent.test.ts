@@ -215,7 +215,14 @@ function fake(script: { content?: string; calls?: [string, Record<string, unknow
     const fk = fake([{ calls: [['search_drive', { query: 'x' }], ['search_notes', { query: 'y' }]] }], { loseAt: 2 });
     const o = await advance(newState('g', []), fk.deps, 60000);
     eq('lost lease', o.kind, 'lost');
+    ok('no orphan when nothing queued', !(o.kind === 'lost' && o.orphanAction));
     ok('second tool not run after lost lease', !fk.log.includes('exec:search_notes'));
+  }
+  // Lost right after queueing: the fresh card is reported as an orphan so the runner rejects it.
+  {
+    const fk = fake([{ calls: [['send_email', {}]] }], { loseAt: 2 });
+    const o = await advance(newState('g', []), fk.deps, 60000);
+    eq('orphan action reported', o, { kind: 'lost', orphanAction: 'act1' });
   }
   // Round cap forces a tool-free final answer.
   {

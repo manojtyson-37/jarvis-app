@@ -158,6 +158,9 @@ export async function runAgent(userId: string, runId: string, budgetMs = 200_000
         if (await releaseRun(runId, owner, 'failed', state, o.reason)) await notify(userId, runId, `I couldn't finish "${state.goal.slice(0, 120)}": ${o.reason}`);
         break;
       case 'lost':
+        // The run was cancelled (or taken over) right after this card was queued: nothing will resume on it,
+        // so it must not stay approvable.
+        if (o.orphanAction) await decideAction(userId, o.orphanAction, 'reject').catch(() => null);
         break;
     }
     return o.kind;
