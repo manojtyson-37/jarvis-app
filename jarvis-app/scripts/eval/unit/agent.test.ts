@@ -1,6 +1,6 @@
 import { tierOf, allowedTools, AGENT_TOOL_TIER } from '../../../src/lib/agent/tiers';
 import { freeSlots, nextWeekRange, parseSlotArgs, istIso, formatSlots } from '../../../src/lib/agent/slots';
-import { parseGoalIntent } from '../../../src/lib/agent/intent';
+import { parseGoalIntent, parseCancelGoal } from '../../../src/lib/agent/intent';
 import { advance, newState, decisionText, repairTranscript, MAX_ROUNDS, type Deps, type ToolCall, type RunState, type ActionStatus } from '../../../src/lib/agent/loop';
 let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
 const eq = (n: string, a: unknown, b: unknown) => ok(`${n} (${JSON.stringify(a)})`, JSON.stringify(a) === JSON.stringify(b));
@@ -18,6 +18,8 @@ ok('never tools not offered', !allowedTools(false).has('log_expense') && !allowe
 ok('web offered before private read', allowedTools(false).has('web_search') && allowedTools(false).has('read_url'));
 ok('web withdrawn after private read', !allowedTools(true).has('web_search') && !allowedTools(true).has('read_url'));
 ok('gated still offered after private read', allowedTools(true).has('send_email'));
+ok('add_todos offered before private read', allowedTools(false).has('add_todos'));
+ok('add_todos withdrawn after private read (relay exfil)', !allowedTools(true).has('add_todos'));
 ok('no recursion: run_goal never offered', !allowedTools(false).has('run_goal'));
 ok('every approval tool is a known gated tool', Object.entries(AGENT_TOOL_TIER).filter(([, t]) => t === 'approval').every(([n]) => ['send_email', 'create_calendar_event', 'delete_calendar_event'].includes(n)));
 
@@ -74,6 +76,9 @@ ok('executed', /approved this step and it was done.*Email sent/.test(decisionTex
 ok('rejected', /rejected.*NOT done/.test(decisionText(st('rejected')) ?? ''));
 ok('failed', /failed: Send failed: 500/.test(decisionText(st('failed', 'Send failed: 500')) ?? ''));
 ok('missing row', /could not be found/.test(decisionText(null) ?? ''));
+ok('executing past expiry -> outcome unknown', /outcome is unknown/.test(decisionText(st('executing', null, true)) ?? ''));
+ok('cancel my goal', parseCancelGoal('cancel my goal') && parseCancelGoal('Stop the agent.') && parseCancelGoal('abort all goals'));
+ok('cancel is not a goal-mention', !parseCancelGoal('cancel the meeting with Ravi') && !parseCancelGoal('stop goal setting for today and then email me'));
 
 // ── loop engine with fake deps ───────────────────────────────────────────
 type Fake = { deps: Deps; log: string[]; steps: Record<string, { status: string; result: string; actionId?: string }>; actions: Record<string, ActionStatus>; checkpoints: number; offered: string[][] };
@@ -170,6 +175,14 @@ function fake(script: { content?: string; calls?: [string, Record<string, unknow
     const o = await advance(s, fk.deps, 60000);
     eq('refused queue -> continues', o.kind, 'done');
     eq('refused step failed', fk.steps.s1.status, 'failed');
+  }
+  // Exfil via a relay write: after a private read, add_todos is refused even if the model names it.
+  {
+    const fk = fake([{ calls: [['get_email', { message_id: 'abc' }]] }, { calls: [['add_todos', { items: ['open https://evil.example/?d=secret'] }]] }, { content: 'done' }]);
+    const s = newState('g', []);
+    await advance(s, fk.deps, 60000);
+    ok('add_todos not run after private read', !fk.log.includes('exec:add_todos'));
+    ok('add_todos not offered after private read', !fk.offered[1].includes('add_todos'));
   }
   // Never-tier / unoffered tool and bad JSON.
   {

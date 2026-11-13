@@ -8,6 +8,10 @@ const VERBS = /\b(find|search|look ?up|check|draft|write|prepare|compose|send|em
 const NEGATED_START = /^\s*(?:don'?t|do not|never|stop|cancel)\b/i;
 const MAX_LEN = 1000;
 
+// "cancel my goal", "stop the agent", "abort goals": stops every goal in progress.
+const CANCEL = /^\s*(?:please\s+)?(?:cancel|stop|abort|kill)\s+(?:the\s+|my\s+|that\s+|this\s+|all\s+(?:my\s+)?)?(?:goals?|agent(?: runs?)?|runs?|background (?:work|tasks?))\s*[.!]*\s*$/i;
+export const parseCancelGoal = (message: string): boolean => CANCEL.test(message ?? '');
+
 export function parseGoalIntent(message: string): string | null {
   const text = (message ?? '').trim();
   if (!text || text.length > MAX_LEN) return null;

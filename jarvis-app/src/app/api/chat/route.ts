@@ -20,8 +20,8 @@ import { handleAwayIntent } from '@/lib/away/chat';
 import { parseTodoCapture } from '@/lib/todos/capture';
 import { insertTodos } from '@/lib/todos/store';
 import { runTodoBatch } from '@/lib/todos/runner';
-import { parseGoalIntent } from '@/lib/agent/intent';
-import { startAgentRun, runAgent } from '@/lib/agent/runner';
+import { parseGoalIntent, parseCancelGoal } from '@/lib/agent/intent';
+import { startAgentRun, runAgent, cancelAgentRuns } from '@/lib/agent/runner';
 import { groq, PRIMARY_MODEL, withFallback, fallbackOpts, TOOLS, executeTool } from '@/lib/chatTools';
 import { shouldRetryToolUseFailed, reportedError } from '@/lib/groqErrors';
 
@@ -195,6 +195,12 @@ export async function POST(req: NextRequest) {
           await finish(n
             ? `Got ${n === 1 ? 'it' : `${n} to-dos`}, Manoj:\n${todoCapture.items.map(t => `• ${t}`).join('\n')}\n\nI'll start on the ones I can do now and report back here. Anything that sends, books or deletes will wait for your Approve; money and passwords stay with you.`
             : "Sorry, Manoj, I couldn't save those to-dos just now. Please send them again in a moment.");
+          return;
+        }
+
+        if (parseCancelGoal(message)) {
+          path.push('agent-cancel');
+          await finish(await cancelAgentRuns(userId).catch(e => { console.error('[chat] cancel failed:', (e as Error).message); return "Sorry, Manoj, I couldn't stop it just now. Please try again."; }));
           return;
         }
 

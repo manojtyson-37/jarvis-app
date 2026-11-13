@@ -56,9 +56,10 @@ const clean = (u: string) => u.replace(/[.,;:!?]+$/, '');
 // What the model is told once Manoj has decided on a paused step.
 export function decisionText(s: ActionStatus): string | null {
   if (!s) return 'The approval request for this step could not be found, so it was NOT done. Do not retry it. Finish and say it is still open.';
-  if (s.status === 'pending' || s.status === 'executing') return s.expired && s.status === 'pending'
-    ? 'The approval request expired without an answer, so it was NOT done. Do not retry it. Finish and say it is still open.'
-    : null;
+  if (s.status === 'pending' && s.expired) return 'The approval request expired without an answer, so it was NOT done. Do not retry it. Finish and say it is still open.';
+  // Stuck mid-execution past its expiry: the server stopped while running it. Never retried (it may have sent).
+  if (s.status === 'executing' && s.expired) return 'Manoj approved this step but its outcome is unknown (the server stopped mid-action). Do not retry it; tell him to check it.';
+  if (s.status === 'pending' || s.status === 'executing') return null;
   if (s.status === 'executed') return `Manoj approved this step and it was done. Result: ${s.result ?? 'done'}`;
   if (s.status === 'failed') return `Manoj approved this step but it failed: ${s.result ?? 'unknown error'}. Do not retry it automatically; report it.`;
   if (s.status === 'rejected') return 'Manoj rejected this step, so it was NOT done. Do not retry it or ask again. Finish what does not depend on it and say what was skipped.';
