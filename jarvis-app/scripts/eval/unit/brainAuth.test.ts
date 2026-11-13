@@ -16,6 +16,10 @@ ok('other paths refused (dashboard)', !brainAuthorized('/api/dashboard', `Bearer
 ok('pages refused', !brainAuthorized('/', `Bearer ${key}`, key));
 ok('lookalike path refused', !brainAuthorized('/api/chatty', `Bearer ${key}`, key));
 ok('nested actions path refused', !brainAuthorized('/api/actions/x/y', `Bearer ${key}`, key));
+ok('linkedin draft with right key', brainAuthorized('/api/linkedin/draft', `Bearer ${key}`, key));
+ok('linkedin draft wrong key refused', !brainAuthorized('/api/linkedin/draft', `Bearer ${'x'.repeat(40)}`, key));
+ok('linkedin gmail fallback', brainAuthorized('/api/linkedin/gmail', `Bearer ${key}`, key));
+ok('other linkedin paths refused', !brainAuthorized('/api/linkedin/send', `Bearer ${key}`, key));
 ok('non-bearer scheme refused', !brainAuthorized('/api/chat', `Basic ${key}`, key));
 
 if (f) { console.error(`${f} failed`); process.exit(1); }

@@ -17,6 +17,8 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadOnlyPaths=/opt/maya-brain
+StateDirectory=maya-brain
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target
