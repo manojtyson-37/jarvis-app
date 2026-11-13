@@ -208,7 +208,7 @@ export const TOOLS: Groq.Chat.ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'find_free_slots',
-      description: "Find free slots in Manoj's Google Calendar on weekdays 10:00-18:00 IST between two dates. Use this (not get_calendar_events) to pick a time for a new meeting. Returns slot start/end as ISO times ready for create_calendar_event.",
+      description: "Find free slots in Manoj's Google Calendar on weekdays 10:00-18:00 IST between two dates. Use this (not get_calendar_events) to pick a time for a new meeting. Returns slot start/end as ISO times ready for create_calendar_event. All-day entries (e.g. holidays) do not block time, so check those separately if relevant.",
       parameters: {
         type: 'object',
         properties: {
@@ -538,11 +538,20 @@ export async function executeTool(name: string, args: Record<string, unknown>, u
       const token = await getGoogleAccessToken();
       if (!token) return 'Google Calendar not configured.';
       // Busy times come from the event list: the granted scope (calendar.events) does not cover the freeBusy API.
-      const q = new URLSearchParams({ timeMin: `${p.from}T00:00:00+05:30`, timeMax: `${p.to}T23:59:59+05:30`, singleEvents: 'true', orderBy: 'startTime', maxResults: '250' });
-      const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${q}`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) return `Calendar lookup failed: ${res.status}`;
-      const data = await res.json() as { items?: CalItem[] };
-      return formatSlots(freeSlots(busyFromEvents(data.items ?? []), p.from, p.to, p.minutes, { now: new Date() }), p.minutes);
+      // Every page, or an error: a missed page would show taken time as free.
+      const items: CalItem[] = [];
+      let pageToken = '';
+      for (let page = 0; ; page++) {
+        if (page >= 4) return 'Calendar too busy to scan in one go: try a shorter date range.';
+        const q = new URLSearchParams({ timeMin: `${p.from}T00:00:00+05:30`, timeMax: `${p.to}T23:59:59+05:30`, singleEvents: 'true', orderBy: 'startTime', maxResults: '250', ...(pageToken ? { pageToken } : {}) });
+        const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${q}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) return `Calendar lookup failed: ${res.status}`;
+        const data = await res.json() as { items?: CalItem[]; nextPageToken?: string };
+        items.push(...(data.items ?? []));
+        if (!data.nextPageToken) break;
+        pageToken = data.nextPageToken;
+      }
+      return formatSlots(freeSlots(busyFromEvents(items), p.from, p.to, p.minutes, { now: new Date() }), p.minutes);
     }
 
     case 'get_meeting_notes': {
