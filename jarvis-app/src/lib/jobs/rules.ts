@@ -55,4 +55,4 @@ export function askNudgeDue(askAt: string | null, nudgedAt: string | null, now: 
 }
 
 // Gmail search for job mail. Automated senders (ATS notices) are kept on purpose: most application mail is automated.
-export const JOB_QUERY = 'newer_than:3d -category:promotions -category:social (application OR applied OR interview OR offer OR "next steps" OR shortlisted OR assessment OR unfortunately OR "regret" OR recruiter OR "your profile" OR candidature)';
+export const JOB_QUERY = 'newer_than:3d -from:me -category:promotions -category:social (application OR applied OR interview OR offer OR "next steps" OR shortlisted OR assessment OR unfortunately OR "regret" OR recruiter OR "your profile" OR candidature)';
