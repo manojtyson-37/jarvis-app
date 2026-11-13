@@ -16,6 +16,7 @@ eq('IST day start exactly at IST midnight', istDayStart(new Date('2026-11-12T18:
 const audit = fromAudit({ created_at: '2026-11-13T04:00:00Z', action_type: 'email', description: 'Queued for approval: Send email to a@b.co' });
 eq('audit email row is action source', audit.source, 'action');
 eq('audit todo row is todo source', fromAudit({ created_at: '2026-11-13T04:00:00Z', action_type: 'todo', description: 'To-do done: x' }).source, 'todo');
+eq('audit nudge row is todo source', fromAudit({ created_at: '2026-11-13T04:00:00Z', action_type: 'nudge', description: 'Nudged: x' }).source, 'todo');
 eq('audit text kept', audit.text, 'Queued for approval: Send email to a@b.co');
 eq('audit text is clipped and one line', fromAudit({ created_at: 'x', action_type: 'email', description: 'a\n\nb '.repeat(100) }).text.length <= 220, true);
 

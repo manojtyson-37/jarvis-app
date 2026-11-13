@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test:unit": "node --experimental-strip-types scripts/eval/unit/activity.test.ts && node --experimental-strip-types scripts/eval/unit/approvals.test.ts"
+    "test:unit": "node --experimental-strip-types scripts/eval/unit/activity.test.ts && node --experimental-strip-types scripts/eval/unit/approvals.test.ts && node --experimental-strip-types scripts/eval/unit/nudges.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",

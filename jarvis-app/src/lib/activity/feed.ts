@@ -49,9 +49,9 @@ const JOB_LABEL: Record<string, string> = {
   offer: 'offer',
 };
 
-// task_queue rows: gated actions (queued, executed, failed, rejected) and to-do runner outcomes (action_type "todo").
+// task_queue rows: gated actions (queued, executed, failed, rejected), to-do runner outcomes (action_type "todo") and nudges ("nudge").
 export function fromAudit(r: { created_at: string; action_type: string; description: string }): ActivityEvent {
-  return { at: r.created_at, source: r.action_type === 'todo' ? 'todo' : 'action', text: clip(r.description, 220) };
+  return { at: r.created_at, source: r.action_type === 'todo' || r.action_type === 'nudge' ? 'todo' : 'action', text: clip(r.description, 220) };
 }
 
 // agent_actions rows. "ignore" and in-flight "processing" rows are noise on a timeline, so they are not shown.
