@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { collectEmailTodos, collectMeetingTodos } from '@/lib/todos/collect';
 import { runTodoBatch } from '@/lib/todos/runner';
+import { nudgeStuckTodos } from '@/lib/todos/nudge';
 import { errorMessage } from '@/lib/errorMessage';
 
 export const runtime = 'nodejs';
@@ -21,7 +22,10 @@ export async function GET(req: Request) {
   }
   try {
     const run = await runTodoBatch(userId, { limit: 3, budgetMs: 200_000 });
-    return NextResponse.json({ collected, ...run });
+    // Nudges are a side channel: their failure is reported in the response and never breaks the batch.
+    let nudges: unknown;
+    try { nudges = await nudgeStuckTodos(userId); } catch (e) { nudges = `error: ${errorMessage(e).slice(0, 120)}`; }
+    return NextResponse.json({ collected, ...run, nudges });
   } catch (e) {
     console.error('todos cron failed:', errorMessage(e));
     return NextResponse.json({ collected, error: errorMessage(e) }, { status: 500 });

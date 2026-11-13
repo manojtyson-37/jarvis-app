@@ -15,6 +15,7 @@ import { GATED_TOOLS, queueAction } from '@/lib/actions';
 import { JOB_TOOLS, JOB_TOOL_NAMES, runJobTool } from '@/lib/jobs/tools';
 import { getGoogleAccessToken } from '@/lib/google';
 import { insertTodos } from '@/lib/todos/store';
+import { ACTIVITY_TOOLS, ACTIVITY_TOOL_NAMES, runActivityTool } from '@/lib/activity/tools';
 import { isToolUseFailed } from '@/lib/groqErrors';
 import { llm } from '@/lib/llm';
 import { parseSlotArgs, freeSlots, formatSlots, busyFromEvents, type CalItem } from '@/lib/agent/slots';
@@ -382,6 +383,7 @@ export const TOOLS: Groq.Chat.ChatCompletionTool[] = [
     },
   },
   ...JOB_TOOLS,
+  ...ACTIVITY_TOOLS,
 ];
 
 export async function executeTool(name: string, args: Record<string, unknown>, userId: string): Promise<string> {
@@ -389,6 +391,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, u
   // only the session-gated /api/actions/[id] endpoint can execute them.
   if (GATED_TOOLS.has(name)) return queueAction(userId, name, args);
   if (JOB_TOOL_NAMES.has(name)) return runJobTool(name, args, userId);
+  if (ACTIVITY_TOOL_NAMES.has(name)) return runActivityTool(name, userId);
   switch (name) {
     case 'save_note':
       await saveNote(userId, args.content as string, (args.tags as string[]) ?? []);
