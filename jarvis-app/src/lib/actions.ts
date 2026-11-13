@@ -129,7 +129,7 @@ export async function queueAction(
 // so the agent loop can pause on exactly this row and resume when it is decided.
 export async function queueActionWithId(
   userId: string, tool: string, rawArgs: Record<string, unknown>,
-): Promise<{ message: string; id: string | null }> {
+): Promise<{ message: string; id: string | null; fresh: boolean }> {
   let input = rawArgs;
   if (tool === 'delete_calendar_event') {
     // Resolve the title now so the user approves "Delete 'Standup'", not an opaque ID.
@@ -137,7 +137,7 @@ export async function queueActionWithId(
     input = { event_id: rawArgs.event_id, event_title: await lookupEventTitle(str(rawArgs.event_id).trim()) };
   }
   const v = validateGatedArgs(tool, input);
-  if (!v.ok) return { message: `Not queued: ${v.error}`, id: null };
+  if (!v.ok) return { message: `Not queued: ${v.error}`, id: null, fresh: false };
 
   const nowIso = new Date().toISOString();
   const { data: open, error: openErr } = await supabase
@@ -145,7 +145,7 @@ export async function queueActionWithId(
     .eq('user_id', userId).eq('status', 'pending').gt('expires_at', nowIso);
   if (openErr) {
     console.error('queueAction pending lookup failed:', openErr.message);
-    return { message: 'Could not queue that action. Nothing was done.', id: null };
+    return { message: 'Could not queue that action. Nothing was done.', id: null, fresh: false };
   }
   // jsonb returns keys in its own order, so compare after re-running each stored row through the
   // validator, which always rebuilds args in one fixed key order.
@@ -159,9 +159,9 @@ export async function queueActionWithId(
   const live = (open ?? []).filter(r => GATED_TOOLS.has(r.tool as string))
     .map(r => ({ id: r.id as string, sig: sig(r.tool as string, (r.args ?? {}) as Record<string, unknown>) })).filter(r => r.sig);
   const dupe = live.find(r => r.sig === wanted);
-  if (dupe) return { message: `Already waiting for your approval: ${v.summary}.`, id: dupe.id };
+  if (dupe) return { message: `Already waiting for your approval: ${v.summary}.`, id: dupe.id, fresh: false };
   if (live.length >= MAX_PENDING) {
-    return { message: `Not queued: ${MAX_PENDING} actions are already waiting for approval. Approve or cancel some first.`, id: null };
+    return { message: `Not queued: ${MAX_PENDING} actions are already waiting for approval. Approve or cancel some first.`, id: null, fresh: false };
   }
 
   const { data, error } = await supabase
@@ -171,14 +171,14 @@ export async function queueActionWithId(
     .single();
   if (error || !data) {
     console.error('queueAction failed:', error?.message);
-    return { message: 'Could not queue that action. Nothing was done.', id: null };
+    return { message: 'Could not queue that action. Nothing was done.', id: null, fresh: false };
   }
   await logTaskExecution(userId, auditType(tool), `Queued for approval: ${v.summary}`, { pending_action_id: data.id, status: 'pending_approval' });
   const longText = (str(v.args.body) || str(v.args.note) || str(v.args.description)).length > EXCERPT;
   const message = longText
     ? `Waiting for your approval: ${v.summary}. It has long text — open Full text on the card, then tap Approve (or "cancel" to drop it).`
     : `Waiting for your approval: ${v.summary}. Say "approve" or tap Approve to do it, "cancel" to drop it.`;
-  return { message, id: data.id as string };
+  return { message, id: data.id as string, fresh: true };
 }
 
 export async function listPendingActions(userId: string): Promise<PendingAction[]> {

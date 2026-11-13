@@ -98,15 +98,26 @@ export async function cancelActiveRuns(userId: string): Promise<{ count: number;
     .update({ status: 'cancelled', result: 'Cancelled by Manoj.', lease_owner: null, lease_until: null, finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     .eq('user_id', userId).in('status', ACTIVE).select('id, state');
   if (error) throw error;
-  const ids = new Set((data ?? []).map(r => ((r.state ?? {}) as { waiting?: { actionId?: unknown } }).waiting?.actionId)
-    .filter((a): a is string => typeof a === 'string'));
-  // Also any card queued by a worker that had not checkpointed it yet (the step row is written first).
+  // Only cards the run itself created. A card Manoj queued from chat that the run merely matched stays his to decide.
+  const ids = new Set((data ?? []).map(r => ((r.state ?? {}) as { waiting?: { actionId?: unknown; fresh?: unknown } }).waiting)
+    .filter(w => w?.fresh === true && typeof w.actionId === 'string').map(w => w!.actionId as string));
+  // Also a card queued by a worker that had not checkpointed it yet (the step row is written first, so a card the
+  // run created is never older than its step).
   const runIds = (data ?? []).map(r => r.id as string);
   if (runIds.length) {
     const { data: steps, error: sErr } = await supabase.from('agent_steps')
-      .select('pending_action_id').in('run_id', runIds).eq('status', 'waiting_approval').not('pending_action_id', 'is', null);
+      .select('pending_action_id, created_at').in('run_id', runIds).eq('status', 'waiting_approval').not('pending_action_id', 'is', null);
     if (sErr) throw sErr;
-    for (const s of steps ?? []) ids.add(s.pending_action_id as string);
+    const stepIds = (steps ?? []).map(s => s.pending_action_id as string);
+    if (stepIds.length) {
+      const { data: acts, error: aErr } = await supabase.from('pending_actions').select('id, created_at').in('id', stepIds);
+      if (aErr) throw aErr;
+      const made = new Map((acts ?? []).map(a => [a.id as string, Date.parse(a.created_at as string)]));
+      for (const s of steps ?? []) {
+        const t = made.get(s.pending_action_id as string);
+        if (t !== undefined && t >= Date.parse(s.created_at as string)) ids.add(s.pending_action_id as string);
+      }
+    }
   }
   return { count: data?.length ?? 0, actionIds: [...ids] };
 }

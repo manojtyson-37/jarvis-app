@@ -104,7 +104,7 @@ function buildDeps(userId: string, runId: string, owner: string, state: RunState
     },
     async queue(name, args) {
       const r = await queueActionWithId(userId, name, args);
-      return { message: r.message, actionId: r.id };
+      return { message: r.message, actionId: r.id, fresh: r.fresh };
     },
     actionStatus: actionId => getActionStatus(userId, actionId),
     stepStart: (call, tier, args, idx) => insertStep(userId, runId, idx, call.name, call.id, args, tier),

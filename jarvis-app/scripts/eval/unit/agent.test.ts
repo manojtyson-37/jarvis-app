@@ -82,7 +82,7 @@ ok('cancel is not a goal-mention', !parseCancelGoal('cancel the meeting with Rav
 
 // ── loop engine with fake deps ───────────────────────────────────────────
 type Fake = { deps: Deps; log: string[]; steps: Record<string, { status: string; result: string; actionId?: string }>; actions: Record<string, ActionStatus>; checkpoints: number; offered: string[][] };
-function fake(script: { content?: string; calls?: [string, Record<string, unknown> | string][] }[], opts: { loseAt?: number; queueFails?: boolean; execThrows?: string } = {}): Fake {
+function fake(script: { content?: string; calls?: [string, Record<string, unknown> | string][] }[], opts: { loseAt?: number; queueFails?: boolean; execThrows?: string; dupe?: boolean } = {}): Fake {
   let turn = 0, n = 0, cp = 0;
   const fk: Fake = { log: [], steps: {}, actions: {}, checkpoints: 0, offered: [], deps: null as unknown as Deps };
   fk.deps = {
@@ -96,8 +96,9 @@ function fake(script: { content?: string; calls?: [string, Record<string, unknow
     async exec(name) { fk.log.push(`exec:${name}`); if (opts.execThrows === name) throw new Error('boom'); return name === 'web_search' ? 'see https://ex.com/a.' : `${name} ok`; },
     async queue(name) {
       fk.log.push(`queue:${name}`);
-      if (opts.queueFails) return { message: 'Not queued: Invalid recipient address.', actionId: null };
-      const id = `act${Object.keys(fk.actions).length + 1}`; fk.actions[id] = st('pending'); return { message: `Waiting for your approval: ${name}`, actionId: id };
+      if (opts.queueFails) return { message: 'Not queued: Invalid recipient address.', actionId: null, fresh: false };
+      if (opts.dupe) return { message: 'Already waiting for your approval', actionId: 'his1', fresh: false };
+      const id = `act${Object.keys(fk.actions).length + 1}`; fk.actions[id] = st('pending'); return { message: `Waiting for your approval: ${name}`, actionId: id, fresh: true };
     },
     async actionStatus(id) { return fk.actions[id] ?? null; },
     async stepStart(tc, tier) { const id = `s${Object.keys(fk.steps).length + 1}`; fk.steps[id] = { status: 'running', result: '' }; fk.log.push(`start:${tc.name}:${tier}`); return id; },
@@ -223,6 +224,8 @@ function fake(script: { content?: string; calls?: [string, Record<string, unknow
     const fk = fake([{ calls: [['send_email', {}]] }], { loseAt: 2 });
     const o = await advance(newState('g', []), fk.deps, 60000);
     eq('orphan action reported', o, { kind: 'lost', orphanAction: 'act1' });
+    const fk2 = fake([{ calls: [['send_email', {}]] }], { loseAt: 2, dupe: true });
+    eq('matched pre-existing card is never an orphan', await advance(newState('g', []), fk2.deps, 60000), { kind: 'lost' });
   }
   // Round cap forces a tool-free final answer.
   {

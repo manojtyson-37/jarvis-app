@@ -15,7 +15,8 @@ export interface Msg {
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }
-export interface Waiting { stepId: string; toolCallId: string; actionId: string; summary: string }
+// fresh = this run created the card (not an identical request that was already waiting): only those may be auto-rejected.
+export interface Waiting { stepId: string; toolCallId: string; actionId: string; summary: string; fresh?: boolean }
 export interface RunState {
   goal: string;
   plan: string[];
@@ -32,7 +33,7 @@ export type ActionStatus = { status: string; result: string | null; expired: boo
 export interface Deps {
   model(messages: Msg[], tools: string[], final: boolean): Promise<{ content: string; toolCalls: ToolCall[] }>;
   exec(name: string, args: Record<string, unknown>): Promise<string>;
-  queue(name: string, args: Record<string, unknown>): Promise<{ message: string; actionId: string | null }>;
+  queue(name: string, args: Record<string, unknown>): Promise<{ message: string; actionId: string | null; fresh: boolean }>;
   actionStatus(actionId: string): Promise<ActionStatus>;
   stepStart(call: ToolCall, tier: 'auto' | 'approval', args: Record<string, unknown>, idx: number): Promise<string>;
   stepEnd(stepId: string, status: 'done' | 'failed' | 'waiting_approval' | 'approved' | 'rejected' | 'expired', result: string, actionId?: string): Promise<void>;
@@ -138,9 +139,9 @@ export async function advance(state: RunState, deps: Deps, budgetMs: number): Pr
           const q = await deps.queue(tc.name, args);
           if (q.actionId) {
             await deps.stepEnd(stepId, 'waiting_approval', q.message, q.actionId);
-            state.waiting = { stepId, toolCallId: tc.id, actionId: q.actionId, summary: q.message };
+            state.waiting = { stepId, toolCallId: tc.id, actionId: q.actionId, summary: q.message, fresh: q.fresh };
             freshSummary = q.message;
-            if (!(await deps.checkpoint(state))) return { kind: 'lost', orphanAction: q.actionId };
+            if (!(await deps.checkpoint(state))) return q.fresh ? { kind: 'lost', orphanAction: q.actionId } : { kind: 'lost' };
             continue; // its tool result is added when Manoj decides
           }
           await deps.stepEnd(stepId, 'failed', q.message);
