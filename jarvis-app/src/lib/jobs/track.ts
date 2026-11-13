@@ -71,7 +71,7 @@ export async function runJobTrack(userId: string): Promise<JobRunResult> {
       const id = await saveApplication(userId, {
         company: ex.company, role: ex.role, status,
         ...(advanced ? { evidence: ex.evidence, sourceMessageId: m.id, sourceThreadId: null, lastUpdateAt: now } : {}),
-      });
+      }, existing?.id);
       result.saved++;
 
       // Decided by the stored state, not by whether this email advanced it: a push that failed last run is retried

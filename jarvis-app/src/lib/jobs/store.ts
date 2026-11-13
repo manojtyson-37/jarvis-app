@@ -26,21 +26,31 @@ export async function findApplication(userId: string, company: string, role: str
   return (data as JobRow | null) ?? null;
 }
 
-// Upserts by (company, role). Only the columns given are written: an older email that changes nothing passes only
-// the status, so evidence, source, date, notified_status and any pending ask all survive.
+// Writes one application. An existing row is UPDATEd by id: an upsert would try the INSERT half first, which fails on the
+// NOT NULL source and date columns when a non-advancing email passes only the status. A new row is upserted in full.
 export async function saveApplication(userId: string, row: {
   company: string; role: string; status: JobStatus;
   evidence?: string; sourceMessageId?: string; sourceThreadId?: string | null; lastUpdateAt?: string;
-}): Promise<string> {
+}, existingId?: string): Promise<string> {
+  const extra = {
+    ...(row.evidence !== undefined ? { evidence: row.evidence } : {}),
+    ...(row.sourceMessageId !== undefined ? { source_message_id: row.sourceMessageId, source_thread_id: row.sourceThreadId ?? null } : {}),
+    ...(row.lastUpdateAt !== undefined ? { last_update_at: row.lastUpdateAt } : {}),
+  };
+  if (existingId) {
+    const { data, error } = await supabase.from('job_applications')
+      .update({ status: row.status, updated_at: new Date().toISOString(), ...extra })
+      .eq('user_id', userId).eq('id', existingId).select('id');
+    if (error) throw error;
+    // Zero rows means the row vanished since it was read: throw so the email stays unseen and is retried as new.
+    if (!data?.length) throw new Error('job application row vanished before update');
+    return existingId;
+  }
   const { data, error } = await supabase.from('job_applications').upsert({
     user_id: userId,
     company: row.company, company_key: matchKey(row.company),
     role: row.role, role_key: matchKey(row.role),
-    status: row.status,
-    updated_at: new Date().toISOString(),
-    ...(row.evidence !== undefined ? { evidence: row.evidence } : {}),
-    ...(row.sourceMessageId !== undefined ? { source_message_id: row.sourceMessageId, source_thread_id: row.sourceThreadId ?? null } : {}),
-    ...(row.lastUpdateAt !== undefined ? { last_update_at: row.lastUpdateAt } : {}),
+    status: row.status, updated_at: new Date().toISOString(), ...extra,
   }, { onConflict: 'user_id,company_key,role_key' }).select('id').single();
   if (error) throw error;
   return (data as { id: string }).id;
