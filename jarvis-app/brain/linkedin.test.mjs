@@ -198,3 +198,18 @@ test('card shows full message and draft; plain text only', () => {
   assert.deepEqual(parseLinkedInCallback('la:tok12345'), { decision: 'approve', token: 'tok12345' });
   assert.equal(parseLinkedInCallback('lx:tok12345'), null);
 });
+
+test('poll logs skipped and auth-refused thread counts, never message text', async () => {
+  const r = rig({ pollOut: { messages: [], skipped: 2, auth_skipped: 1 } });
+  const logs = [];
+  r.inbox.d.log = (...a) => logs.push(a.join(' '));
+  await r.inbox.poll();
+  assert.deepEqual(logs, ['linkedin poll skipped 2 thread(s), 1 refused (auth) this round']);
+});
+test('poll with nothing skipped logs nothing', async () => {
+  const r = rig({ pollOut: { messages: [], skipped: 0, auth_skipped: 0 } });
+  const logs = [];
+  r.inbox.d.log = (...a) => logs.push(a.join(' '));
+  await r.inbox.poll();
+  assert.deepEqual(logs, []);
+});

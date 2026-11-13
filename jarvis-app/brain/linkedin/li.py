@@ -129,15 +129,17 @@ def load_seen(path=None):
         with open(path) as f:
             d = json.load(f)
         return {"ids": list(d.get("ids", [])), "bootstrapped": bool(d.get("bootstrapped")),
-                "threads": dict(d.get("threads", {})), "names": dict(d.get("names", {}))}
+                "threads": dict(d.get("threads", {})), "names": dict(d.get("names", {})),
+                "boot_pending": list(d.get("boot_pending", [])), "boot_at": int(d.get("boot_at") or 0)}
     except (FileNotFoundError, ValueError):
-        return {"ids": [], "bootstrapped": False, "threads": {}, "names": {}}
+        return {"ids": [], "bootstrapped": False, "threads": {}, "names": {}, "boot_pending": [], "boot_at": 0}
 
 
 def save_seen(state, path=None):
     path = path or SEEN_FILE
     state = {"ids": state["ids"][-SEEN_CAP:], "bootstrapped": state["bootstrapped"],
-             "threads": state.get("threads", {}), "names": dict(list(state.get("names", {}).items())[-500:])}
+             "threads": state.get("threads", {}), "names": dict(list(state.get("names", {}).items())[-500:]),
+             "boot_pending": list(state.get("boot_pending", [])), "boot_at": int(state.get("boot_at") or 0)}
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f)
@@ -243,7 +245,7 @@ class Session:
             d = self.get(f"/voyagerMessagingDashMessengerMessages?q=syncToken&conversationUrn={enc(conv)}", JSON_ACCEPT)
             return parse_messages(d, conv, title)
         except RuntimeError:
-            pass  # AuthError is not a RuntimeError: it is not retried via the fallback (cmd_poll counts it as skipped)
+            pass  # AuthError is not a RuntimeError: it is not retried via the fallback (cmd_poll counts it as auth_skipped)
         d = self.get(f"/voyagerMessagingDashMessengerMessages?q=conversation&conversationUrn={enc(conv)}"
                      f"&count={FALLBACK_PAGE}", JSON_ACCEPT)
         raw = [m for m in (d or {}).get("included") or [] if m.get("$type") == "com.linkedin.messenger.Message"]
@@ -290,17 +292,37 @@ def cmd_poll(s):
     convs = s.conversations()
     bootstrap = not st["bootstrapped"]
     now = int(time.time() * 1000)
-    msgs, visible, quiet, skipped, failed = [], [], [], 0, set()
+    msgs, visible, quiet, failed = [], [], [], set()
+    pending = set(st.get("boot_pending", []))  # threads the first run could not read
+    skipped = auth_skipped = 0
     for c in changed_threads(convs, st["threads"], bootstrap, now):
         try:
             cand, ids = thread_candidates(s.messages(c["conversation"], c["title"]), me)
-        except (RuntimeError, AuthError):
-            skipped += 1  # reported in the output so the bridge logs it
+        except AuthError:
+            auth_skipped += 1  # refused for this thread only; a dead session fails conversations() first
+            failed.add(c["conversation"])
+            continue
+        except RuntimeError:
+            skipped += 1  # both counts go in the output so the bridge logs them
             failed.add(c["conversation"])
             continue  # one refused thread is not a dead session; it retries next poll
         time.sleep(1)  # gentle pacing between thread reads
         visible += ids
         unseen = [m for m in cand if m["id"] not in seen and m["sender_urn"] != me]
+        if not bootstrap and c["conversation"] in pending:
+            # First successful read of a thread the first run missed: its history from BEFORE the
+            # first run gets the first-run limits (cutoff + cap, measured from that run), once, for
+            # this thread only, and the rest of that history counts as handled. Anything that arrived
+            # after the first run is new mail and flows normally. boot_at 0 = unknown: no limits.
+            boot_at = st.get("boot_at") or 0
+            old = [m for m in unseen if m["at"] <= boot_at]
+            cutoff = boot_at - BOOTSTRAP_DAYS * 86400_000
+            hist = sorted((m for m in old if m["at"] >= cutoff), key=lambda m: m["at"])[-BOOTSTRAP_MAX:]
+            fresh = [m for m in unseen if m["at"] > boot_at]
+            keep = {m["id"] for m in hist + fresh}
+            unseen = sorted(hist + fresh, key=lambda m: m["at"])
+            st["ids"] += [i for i in dict.fromkeys(ids) if i not in keep and i not in seen]
+            pending.discard(c["conversation"])
         if not unseen:
             quiet.append(c)  # nothing to show here: skip it until it changes again
         msgs += unseen[-10:]  # one card holds at most 10; the rest come next poll
@@ -316,7 +338,12 @@ def cmd_poll(s):
         for c in convs:  # old threads: start watching from their current activity
             if c["conversation"] not in shown and c["conversation"] not in failed:  # unread: retry next poll
                 st["threads"].setdefault(c["conversation"], c["at"])
+        # Threads that failed now get the first-run limits on their own first successful read
+        # (see above), so one thread that keeps failing never holds the whole inbox in first-run mode.
+        pending = set(failed)
         st["bootstrapped"] = True
+        st["boot_at"] = now
+    st["boot_pending"] = sorted(pending)
     names = st.setdefault("names", {})
     for m in new:
         urn = m.pop("sender_urn", None)
@@ -326,7 +353,7 @@ def cmd_poll(s):
                 names[urn] = n
         m["sender"] = names.get(urn) or m["sender"]
     save_seen(st)
-    print(json.dumps({"messages": new, "skipped": skipped}))
+    print(json.dumps({"messages": new, "skipped": skipped, "auth_skipped": auth_skipped}))
 
 
 def cmd_send(s):

@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 
 import li
@@ -8,6 +9,11 @@ import li
 ME = "urn:li:fs_miniProfile:ME"
 DAY = 86400_000
 NOW = 1_800_000_000_000
+ME2 = "urn:li:fsd_profile:MEMEMEMEMEMEMEME"
+
+
+def tmsg(i, conv, at, who="urn:li:fsd_profile:PUSHPITA00000"):
+    return {"id": i, "conversation": conv, "sender": "P", "sender_urn": who, "text": "hi", "at": at}
 
 
 def ev(eid, text, who="urn:li:fs_miniProfile:P", first="Pushpita", last="Mazumdar", at=NOW):
@@ -56,7 +62,7 @@ class Dedupe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "seen.json")
             open(p, "w").write("{oops")
-            self.assertEqual(li.load_seen(p), {"ids": [], "bootstrapped": False, "threads": {}, "names": {}})
+            self.assertEqual(li.load_seen(p), {"ids": [], "bootstrapped": False, "threads": {}, "names": {}, "boot_pending": [], "boot_at": 0})
 
     def test_seen_store_is_capped(self):
         with tempfile.TemporaryDirectory() as d:
@@ -184,7 +190,94 @@ class Parsing(unittest.TestCase):
             finally:
                 li.SEEN_FILE = old
         out = json.loads(buf.getvalue().strip().splitlines()[-1])
-        self.assertEqual(out, {"messages": [], "skipped": 1})
+        self.assertEqual(out, {"messages": [], "skipped": 1, "auth_skipped": 0})
+
+    def _poll(self, fail):
+        """One bootstrap poll where `fail` (an exception or None) is raised for the only thread."""
+        def read(c):
+            if fail: raise fail
+            return []
+        with tempfile.TemporaryDirectory() as d:
+            [(out, st)] = self._polls(d, [read], [CONV])
+        return out, st
+
+    def _polls(self, d, readers, convs):
+        """Run len(readers) polls on one seen file; readers[i](conv) returns that poll's messages or raises."""
+        import io, contextlib
+        from unittest import mock
+        res = []
+        for n, read in enumerate(readers):
+            at = int(time.time() * 1000) + n * 1000  # thread activity moves on every poll
+            class S:
+                def me_urn(self): return ME2
+                def conversations(self): return [{"conversation": c, "title": "t", "at": at} for c in convs]
+                def messages(self, c, t): return [dict(m) for m in read(c)]  # cmd_poll mutates what it returns
+                def name(self, u): return ""
+            old = li.SEEN_FILE; li.SEEN_FILE = os.path.join(d, "s.json")
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf), mock.patch("li.time.sleep"):
+                    li.cmd_poll(S())
+                st = li.load_seen()
+            finally:
+                li.SEEN_FILE = old
+            res.append((json.loads(buf.getvalue().strip().splitlines()[-1]), st))
+        return res
+
+    def test_failed_thread_is_pending_not_blocking(self):
+        out, st = self._poll(RuntimeError("linkedin status 500"))
+        self.assertTrue(st["bootstrapped"])
+        self.assertEqual(st["boot_pending"], [CONV])
+        self.assertNotIn(CONV, st["threads"])
+
+    def test_auth_skip_counted_apart(self):
+        out, st = self._poll(li.AuthError("status 403"))
+        self.assertEqual((out["skipped"], out["auth_skipped"]), (0, 1))
+        self.assertEqual(st["boot_pending"], [CONV])
+
+    def test_pending_thread_gets_first_run_limits_once_on_recovery(self):
+        now = int(time.time() * 1000)
+        old = [tmsg(f"o{i}", CONV, now - 20 * DAY + i) for i in range(2)]      # older than the cutoff
+        recent = [tmsg(f"r{i}", CONV, now - DAY + i) for i in range(7)]        # 7 recent, cap is 5
+        def fail(c): raise RuntimeError("linkedin status 500")
+        with tempfile.TemporaryDirectory() as d:
+            (_, _), (out2, st2), (out3, _) = self._polls(d, [fail, lambda c: old + recent, lambda c: old + recent], [CONV])
+        self.assertEqual([m["id"] for m in out2["messages"]], [f"r{i}" for i in range(2, 7)])
+        self.assertEqual(st2["boot_pending"], [])
+        self.assertTrue({"o0", "o1", "r0", "r1"} <= set(st2["ids"]))
+        # Third poll: no longer pending, so the 5 shown (not yet marked by the bridge) come back, nothing else.
+        self.assertEqual([m["id"] for m in out3["messages"]], [f"r{i}" for i in range(2, 7)])
+
+    def test_late_recovery_keeps_everything_after_first_run(self):
+        # Thread fails on the first run, recovers much later with 3 history + 8 messages sent after
+        # the first run: all 8 later ones must come through (up to the 10-per-card limit), none marked seen.
+        def fail(c): raise RuntimeError("linkedin status 500")
+        with tempfile.TemporaryDirectory() as d:
+            [(_, st1)] = self._polls(d, [fail], [CONV])
+            boot = st1["boot_at"]
+            hist = [tmsg(f"h{i}", CONV, boot - DAY + i) for i in range(3)]
+            later = [tmsg(f"n{i}", CONV, boot + 1000 + i) for i in range(8)]
+            [(out2, st2)] = self._polls(d, [lambda c: hist + later], [CONV])
+        self.assertGreater(boot, 0)
+        ids = [m["id"] for m in out2["messages"]]
+        self.assertTrue({f"n{i}" for i in range(8)} <= set(ids))
+        self.assertFalse({f"n{i}" for i in range(8)} & set(st2["ids"]))
+        self.assertEqual(len(st2["ids"]), len(set(st2["ids"])))
+
+    def test_failing_thread_never_drops_other_threads_messages(self):
+        other = CONV.replace("ZjE2", "T1RI")
+        now = int(time.time() * 1000)
+        burst = [tmsg(f"b{i}", other, now - 60_000 + i) for i in range(6)]    # 6 quick messages, above the cap
+        def read(c):
+            if c == CONV: raise li.AuthError("status 403")
+            return reads.pop(0)
+        reads = [[], burst]
+        with tempfile.TemporaryDirectory() as d:
+            (_, st1), (out2, st2) = self._polls(d, [read, read], [CONV, other])
+        self.assertEqual(st1["boot_pending"], [CONV])
+        self.assertEqual(len(out2["messages"]), 6)
+        self.assertFalse({m["id"] for m in burst} & set(st2["ids"]))  # none silently marked seen
+
 
     def test_text_capped(self):
         payload = {"included": [{"$type": "com.linkedin.messenger.Message", "entityUrn": "u", "conversationUrn": CONV, "senderUrn": "urn:li:fsd_profile:X", "body": {"text": "x" * 20000}}]}
