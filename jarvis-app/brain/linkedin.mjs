@@ -169,6 +169,7 @@ export class LinkedInInbox {
     if (this.editing?.token === p.token) this.editing = null;
     await answer('Sending...'); // answer now: Telegram drops late callback answers
     const r = await this.d.worker('send', [], JSON.stringify({ conversation: card.conversation, text: card.draft }));
+    this.d.log(`linkedin send exit ${r.code}${r.out?.error ? ` (${r.out.error})` : ''}`); // no message text in logs
     if (r.code === 0) {
       await this.d.send(`Sent to ${card.sender} on LinkedIn.`);
     } else if (r.code === 3) {

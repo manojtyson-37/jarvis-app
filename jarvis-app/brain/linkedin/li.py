@@ -230,8 +230,14 @@ class Session:
     def messages(self, conv, title):
         if not CONV_URN.match(conv):
             raise ValueError("bad conversation id")
-        d = self.get(f"/voyagerMessagingDashMessengerMessages?q=conversation&conversationUrn={enc(conv)}&count=20", JSON_ACCEPT)
-        return parse_messages(d, conv, title)
+        # q=syncToken returns the NEWEST messages. q=conversation pages from the OLDEST (verified live
+        # 2026-11-13: a long thread's 20 came back from 2023-2024), so it is only a fallback.
+        d = self.get(f"/voyagerMessagingDashMessengerMessages?q=syncToken&conversationUrn={enc(conv)}", JSON_ACCEPT)
+        msgs = parse_messages(d, conv, title)
+        if not msgs:
+            d = self.get(f"/voyagerMessagingDashMessengerMessages?q=conversation&conversationUrn={enc(conv)}&count=20", JSON_ACCEPT)
+            msgs = parse_messages(d, conv, title)
+        return msgs
 
     def send(self, conv, text):
         if not CONV_URN.match(conv):
