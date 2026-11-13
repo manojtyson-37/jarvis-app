@@ -137,7 +137,7 @@ export async function runTodoBatch(userId: string, opts: { limit?: number; budge
   }
   const report = buildReport(outcomes);
   if (!report) return { ran: 0, reported: false };
-  await appendConversation(userId, 'assistant', report.chat);
+  await appendConversation(userId, 'assistant', report.chat).catch(e => console.error('[todos] chat report not saved:', (e as Error).message));
   await sendPush(userId, { ...report.push, tag: `todos-${startedAt}` }).catch(() => false);
   return { ran: outcomes.length, reported: true };
 }

@@ -1,10 +1,19 @@
 import { ACTIVITY_QUESTION_RE } from './activity/feed';
+import { HISTORY_QUESTION_RE } from './conversations/search';
+import { TASK_LIST_RE } from './tasks/rules';
+import { PIPELINE_RE } from './pipeline/rules';
 
 // Sends the model only the tool definitions a message can plausibly need. All ~33 definitions cost ~3k tokens
 // per call, and the free Groq tier allows 8k tokens/minute, so a full set made every second message wait ~40s.
 const CATEGORIES: { tools: string[]; re: RegExp }[] = [
   // "What did you do today": the activity timeline. The regex is shared with the forced route in the chat route.
   { tools: ['get_today_activity'], re: ACTIVITY_QUESTION_RE },
+  // "What did I tell you about X": a look back over the full chat history, all devices.
+  { tools: ['search_conversations'], re: HISTORY_QUESTION_RE },
+  // "What tasks are open": the one list across devices. The regex is shared with the forced route in the chat route.
+  { tools: ['list_tasks'], re: TASK_LIST_RE },
+  // "How many prospects, how many sales": counts from the last pipeline snapshot.
+  { tools: ['get_pipeline'], re: PIPELINE_RE },
   { tools: ['list_emails', 'get_email', 'send_email', 'list_labels'],
     // Job-search updates arrive only by email; on 2026-11-10 "Any job roles where I am moved to next stage rejected?"
     // got "I don't have a tool to track job applications" whenever the chat before it was not about email.
@@ -23,7 +32,7 @@ const CATEGORIES: { tools: string[]; re: RegExp }[] = [
     re: /\b(expenses?|spent|spend|spending|income|salary|paid|pay|earned|budget|finance|rupees?|rs\.?|₹|cost|bought|bill|burn|burned|savings?)\b/i },
   { tools: ['get_morning_briefing'], re: /\b(briefing|brief me|morning|my day|rundown)\b/i },
   { tools: ['read_url'], re: /https?:\/\/|\bwww\./i },
-  { tools: ['get_meeting_notes', 'get_action_items', 'complete_action_item', 'add_todos'],
+  { tools: ['get_meeting_notes', 'get_action_items', 'complete_action_item', 'add_todos', 'list_tasks'],
     re: /\b(meeting|meetings|minutes|action items?|to-?dos?|tasks?|transcript|call with)\b/i },
 ];
 

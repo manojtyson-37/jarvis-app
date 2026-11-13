@@ -24,6 +24,10 @@ import { parseGoalIntent, parseCancelGoal } from '@/lib/agent/intent';
 import { startAgentRun, runAgent, cancelAgentRuns } from '@/lib/agent/runner';
 import { groq, PRIMARY_MODEL, withFallback, fallbackOpts, TOOLS, executeTool } from '@/lib/chatTools';
 import { isActivityQuestion } from '@/lib/activity/feed';
+import { resolveChannel } from '@/lib/conversations/channel';
+import { isTaskListQuestion } from '@/lib/tasks/rules';
+import { isPipelineQuestion } from '@/lib/pipeline/rules';
+import { brainAuthorized } from '@/lib/brainAuth';
 import { shouldRetryToolUseFailed, reportedError } from '@/lib/groqErrors';
 
 // Vercel's default would otherwise cut a long tool-plus-summary turn off with no message.
@@ -60,6 +64,9 @@ const SKIP_NARRATION_TOOLS = new Set([
   'complete_action_item', 'send_email', 'create_calendar_event',
   'list_emails', 'get_email', 'list_labels', 'search_drive', 'read_drive_file',
   'get_today_activity', // factual lookup over the audit trail: returned raw, never narrated
+  'search_conversations', // old messages can quote emails and pages: shown raw, never fed back through a narration pass
+  'list_tasks', // factual lookup over the task tables: returned raw, never narrated
+  'get_pipeline', // business numbers: returned raw, a narrated count could be a made-up count
 ]);
 
 const ACTIONISH = /\b(send|add|remind|log|save|delete|cancel|set|create|schedule|book|mark|find|search|read|summari[sz]e|move|reschedule|forward|open|list)\b/i;
@@ -75,6 +82,13 @@ export async function POST(req: NextRequest) {
   const userId = evalUser ?? 'manoj';
 
   if (!message?.trim()) return NextResponse.json({ error: 'Empty message' }, { status: 400 });
+
+  // Which device this turn came from, so the shared history can say where each message was written.
+  const channel = resolveChannel({
+    brainKey: brainAuthorized('/api/chat', req.headers.get('authorization'), process.env.MAYA_BRAIN_KEY),
+    clientHeader: req.headers.get('x-maya-client'),
+    userAgent: req.headers.get('user-agent'),
+  });
 
   const history = await getConversationHistory(userId, 10);
   const [memoryFacts, rules] = await Promise.all([getPromptFacts(userId, 20), getRules(userId)]);
@@ -112,7 +126,11 @@ export async function POST(req: NextRequest) {
             ? { type: 'function' as const, function: { name: 'get_calendar_events' } }
             : isActivityQuestion(message)
               ? { type: 'function' as const, function: { name: 'get_today_activity' } }
-              : 'auto' as const;
+              : isTaskListQuestion(message)
+                ? { type: 'function' as const, function: { name: 'list_tasks' } }
+                : isPipelineQuestion(message)
+                  ? { type: 'function' as const, function: { name: 'get_pipeline' } }
+                  : 'auto' as const;
 
   // Only the tool definitions this message can need — see toolRouting.ts for why.
   const forcedName = typeof forcedToolChoice === 'object' ? forcedToolChoice.function.name : undefined;
@@ -122,7 +140,8 @@ export async function POST(req: NextRequest) {
   // "What about jobs?" then "In my inbox": the question is about job emails, not the whole inbox.
   const prevUser = [...history].slice(-2).reverse().find(h => h.role === 'user')?.content;
 
-  await appendConversation(userId, 'user', message);
+  // A failed save must not fail the turn: Manoj still gets his answer, and the error is logged.
+  await appendConversation(userId, 'user', message, channel).catch(e => console.error('[chat] message not saved:', (e as Error).message));
 
   // "My to-dos: a, b" (the check-in push prefills this) or "add X to my to-dos": saved, then worked on right after the
   // reply goes out. The runner reports in chat and by push when it finishes.
@@ -163,7 +182,7 @@ export async function POST(req: NextRequest) {
       const emit = (text: string) => send(sseChunk(text));
       const saveReply = async (text: string) => {
         if (settled) return;
-        await appendConversation(userId, 'assistant', text).catch(e => console.error('[chat] reply not saved:', (e as Error).message));
+        await appendConversation(userId, 'assistant', text, channel).catch(e => console.error('[chat] reply not saved:', (e as Error).message));
       };
       const close = () => {
         if (settled) return;
@@ -176,7 +195,7 @@ export async function POST(req: NextRequest) {
         if (settled) return;
         console.error(`[chat] turn hit the deadline ms=${Date.now() - startedAt} path=${path.join('>')}`);
         const msg = 'Sorry, Manoj, that took too long and I had to stop. Please ask again.';
-        appendConversation(userId, 'assistant', msg).catch(e => console.error('[chat] reply not saved:', (e as Error).message));
+        appendConversation(userId, 'assistant', msg, channel).catch(e => console.error('[chat] reply not saved:', (e as Error).message));
         emit(msg);
         close();
       }, 52000);

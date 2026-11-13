@@ -1,7 +1,8 @@
 // Server-to-server access for the maya-brain Telegram bridge (runs on the droplet).
 // The brain holds MAYA_BRAIN_KEY, never the session secret, and may only reach the chat
-// and the pending-action routes. Everything else still needs the browser session cookie.
-const BRAIN_PATHS = [/^\/api\/chat$/, /^\/api\/actions$/, /^\/api\/actions\/[0-9a-f-]{36}$/i, /^\/api\/linkedin\/(draft|gmail)$/];
+// and the pending-action routes, plus the counts-only pipeline report (scripts/pipeline-snapshot.mjs uses the same key).
+// Everything else still needs the browser session cookie.
+const BRAIN_PATHS = [/^\/api\/chat$/, /^\/api\/actions$/, /^\/api\/actions\/[0-9a-f-]{36}$/i, /^\/api\/linkedin\/(draft|gmail)$/, /^\/api\/pipeline\/report$/];
 const MIN_KEY_LEN = 32;
 
 // Middleware runs on the edge runtime (no node:crypto), so compare in constant time by hand.

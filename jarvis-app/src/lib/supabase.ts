@@ -1,6 +1,7 @@
 import 'server-only';
 import { createClient } from '@supabase/supabase-js';
 import { ruleKey } from '@/lib/instructions';
+import type { Channel } from '@/lib/conversations/channel';
 
 // Server-only client. Every importer is a server route or lib, so it uses the
 // service-role key, which bypasses RLS. RLS is enabled with no policies on every
@@ -140,20 +141,15 @@ export async function getConversationHistory(userId: string, limit = 20) {
   return (data ?? []).reverse();
 }
 
-export async function appendConversation(userId: string, role: 'user' | 'assistant', content: string) {
-  await supabase.from('conversation_history').insert({ user_id: userId, role, content });
-  // Fire-and-forget prune — never blocks the response path
-  pruneConversation(userId).catch(() => {});
-}
-
-async function pruneConversation(userId: string) {
-  const { data: keep } = await supabase
-    .from('conversation_history').select('id').eq('user_id', userId)
-    .order('ts', { ascending: false }).limit(100);
-  if ((keep?.length ?? 0) >= 100) {
-    await supabase.from('conversation_history').delete()
-      .eq('user_id', userId).not('id', 'in', `(${keep!.map((r: { id: string }) => r.id).join(',')})`);
-  }
+// Every message is kept: search_conversations reads the full history, so nothing is pruned any more.
+// `channel` is the device the message came from (see conversations/channel.ts).
+export async function appendConversation(userId: string, role: 'user' | 'assistant', content: string, channel: Channel = 'system') {
+  const { error } = await supabase.from('conversation_history').insert({ user_id: userId, role, content, channel });
+  if (!error) return;
+  // Code can go live before the `channel` column does. Losing the label is fine; losing the message is not.
+  if (!/channel/i.test(error.message)) throw new Error(`appendConversation failed: ${error.message}`);
+  const retry = await supabase.from('conversation_history').insert({ user_id: userId, role, content });
+  if (retry.error) throw new Error(`appendConversation failed: ${retry.error.message}`);
 }
 
 // ── Push Subscriptions ─────────────────────────────────────────────────────
@@ -366,7 +362,7 @@ export async function completeActionItem(userId: string, itemId: string): Promis
 
 export async function logTaskExecution(
   userId: string,
-  actionType: 'email' | 'calendar' | 'todo' | 'nudge' | 'agent',
+  actionType: 'email' | 'calendar' | 'todo' | 'nudge' | 'agent' | 'pipeline',
   description: string,
   payload?: object
 ) {

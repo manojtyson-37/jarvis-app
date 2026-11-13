@@ -9,6 +9,6 @@ export const TOOL_LABELS: Record<string, string> = {
   log_expense: 'Logging the expense', log_income: 'Logging the income', get_finance_summary: 'Totalling your spending',
   get_morning_briefing: 'Putting your briefing together', web_search: 'Searching the web', read_url: 'Reading the page',
   list_job_applications: 'Checking your applications', get_job_profile: 'Checking your job facts', set_job_profile: 'Saving your job facts', clear_job_ask: 'Clearing the reply',
-  get_today_activity: 'Looking back at today',
+  get_today_activity: 'Looking back at today', search_conversations: 'Searching our past chats', list_tasks: 'Checking every task list', get_pipeline: 'Checking prospects and sales',
   get_meeting_notes: 'Opening meeting notes', get_action_items: 'Checking action items', complete_action_item: 'Updating the item', add_todos: 'Adding to-dos',
 };
