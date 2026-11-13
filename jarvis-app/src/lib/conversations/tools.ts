@@ -1,7 +1,7 @@
 // Chat tool for searching the full chat history. Read-only.
 import type Groq from 'groq-sdk';
 import { supabase } from '@/lib/supabase';
-import { searchTerms, escapeLike, clampHits, clampDays, dropSelfMatches, formatHits, type ConversationRow } from './search';
+import { searchTerms, escapeLike, clampHits, clampDays, dropSelfMatches, dropSearchAnswers, formatHits, type ConversationRow } from './search';
 import { isChannel } from './channel';
 
 export const CONVERSATION_TOOLS: Groq.Chat.ChatCompletionTool[] = [
@@ -40,8 +40,8 @@ export async function runConversationTool(name: string, args: Record<string, unk
     for (const t of terms) q = q.ilike('content', `%${escapeLike(t)}%`);
     if (days) q = q.gte('ts', new Date(now.getTime() - days * 86_400_000).toISOString());
     if (withChannel && channel) q = q.eq('channel', channel);
-    // A few extra rows: the question that triggered this search is dropped below.
-    return q.order('ts', { ascending: false }).limit(limit + 4);
+    // Extra rows: the question that triggered this search and Maya's earlier search answers are dropped below.
+    return q.order('ts', { ascending: false }).limit(limit * 2 + 4);
   };
   let { data, error } = await run(true);
   let channelUsed = channel;
@@ -51,7 +51,7 @@ export async function runConversationTool(name: string, args: Record<string, unk
     console.error('[conversations] search failed:', error.message);
     return 'I could not search the chat history just now. Please try again.';
   }
-  const rows = dropSelfMatches((data ?? []) as ConversationRow[], now).slice(0, limit);
+  const rows = dropSearchAnswers(dropSelfMatches((data ?? []) as ConversationRow[], now)).slice(0, limit);
   const scope = `${channelUsed ? ` on ${channelUsed}` : ''}${days ? ` in the last ${days} day${days === 1 ? '' : 's'}` : ''}`;
   return formatHits(rows, terms, scope);
 }

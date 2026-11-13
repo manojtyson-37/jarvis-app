@@ -1,5 +1,5 @@
 // @ts-nocheck: run with `node --experimental-strip-types`, which needs the explicit .ts import path that tsc rejects.
-import { searchTerms, escapeLike, clampHits, clampDays, snippet, istStamp, dropSelfMatches, formatHits, HISTORY_QUESTION_RE, MAX_HITS, DEFAULT_HITS } from '../../../src/lib/conversations/search.ts';
+import { dropSearchAnswers, searchTerms, escapeLike, clampHits, clampDays, snippet, istStamp, dropSelfMatches, formatHits, HISTORY_QUESTION_RE, MAX_HITS, DEFAULT_HITS } from '../../../src/lib/conversations/search.ts';
 import { resolveChannel, isChannel } from '../../../src/lib/conversations/channel.ts';
 let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
 const eq = (n: string, a: unknown, b: unknown) => ok(`${n} (${JSON.stringify(a)})`, JSON.stringify(a) === JSON.stringify(b));
@@ -57,6 +57,8 @@ const rows = [
 eq('just-asked question dropped', dropSelfMatches(rows, now).length, 2);
 eq('older rows kept', dropSelfMatches(rows, now)[0].content, 'Razorpay offer is 42 LPA');
 eq('row with a bad time is kept', dropSelfMatches([{ ts: 'x' }], now).length, 1);
+
+eq('old search answers are not hits', dropSearchAnswers([{ role: 'assistant', content: 'No earlier messages mention "razorpay".' }, { role: 'assistant', content: '2 earlier messages mention "razorpay", newest first' }, { role: 'user', content: 'No earlier messages mention this, right?' }, { role: 'assistant', content: 'Razorpay offer noted.' }]).map(r => r.content), ['No earlier messages mention this, right?', 'Razorpay offer noted.']);
 
 // ── output ──────────────────────────────────────────────────────────────
 const out = formatHits(dropSelfMatches(rows, now), ['razorpay'], '');

@@ -56,6 +56,11 @@ export function dropSelfMatches<T extends { ts: string }>(rows: T[], now: Date):
   return rows.filter(r => { const t = new Date(r.ts).getTime(); return Number.isNaN(t) || t < cutoff; });
 }
 
+// Maya's own search answers repeat the search words, so an old search would show up as a hit for the next one.
+const SEARCH_ANSWER_RE = /^(?:No earlier messages mention |\d+ earlier messages? mention )/;
+export const dropSearchAnswers = <T extends { role: string; content: string }>(rows: T[]): T[] =>
+  rows.filter(r => !(r.role === 'assistant' && SEARCH_ANSWER_RE.test(r.content)));
+
 export function formatHits(rows: ConversationRow[], terms: string[], scope: string): string {
   if (!terms.length) return 'Tell me a word or name to search the chat history for.';
   if (!rows.length) return `No earlier messages mention ${terms.map(t => `"${t}"`).join(' and ')}${scope}.`;
