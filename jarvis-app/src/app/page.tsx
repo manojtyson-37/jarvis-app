@@ -7,7 +7,7 @@ import { TOOL_LABELS } from '@/lib/toolLabels';
 import type { ActivitySource } from '@/lib/activity/feed';
 import { ChatIcon, NoteIcon, BellIcon, ActivityIcon, MicIcon, SendIcon, XIcon, CheckIcon, LogOutIcon, WaveIcon, MailIcon, CalendarIcon, SparkIcon, TrashIcon, RefreshIcon, ShieldIcon, ClockIcon } from '@/components/icons';
 
-type Tab = 'chat' | 'notes' | 'reminders' | 'fitness' | 'activity';
+type Tab = 'chat' | 'approvals' | 'notes' | 'reminders' | 'fitness' | 'activity';
 interface TimelineItem { at: string; source: ActivitySource; text: string }
 const TIMELINE_SOURCE: Record<ActivitySource, string> = { action: 'Action', todo: 'To-do', away: 'Away', job: 'Jobs' };
 
@@ -105,6 +105,10 @@ export default function MayaPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [pending, setPending] = useState<PendingAction[]>([]);
   const pendingRef = useRef<PendingAction[]>([]);
+  // Last Approve/Cancel result, shown on the Approvals tab itself (the chat reply is off-screen there).
+  const [lastDecision, setLastDecision] = useState('');
+  // A result from an earlier visit must not sit on the Approvals tab. Decisions made while on the tab still show.
+  useEffect(() => { if (tab === 'approvals') setLastDecision(''); }, [tab]);
   const [handsFree, setHandsFree] = useState(false);
   const handsFreeRef = useRef(false);
   const decidingRef = useRef(false);
@@ -222,7 +226,7 @@ export default function MayaPage() {
   }, []);
 
   useEffect(() => {
-    if (tab !== 'chat' && tab !== 'activity') loadDashboard();
+    if (tab !== 'chat' && tab !== 'activity' && tab !== 'approvals') loadDashboard();
   }, [tab, loadDashboard]);
 
   // Each request gets a number; only the newest one may write. Toggling Today/Week fast must not let an older reply win.
@@ -308,6 +312,7 @@ export default function MayaPage() {
         message = 'Could not reach the server. Nothing was changed.';
       }
       setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: message, ts: new Date() }]);
+      setLastDecision(message);
       await loadPending();
       const left = pendingRef.current;
       speak(
@@ -544,11 +549,14 @@ export default function MayaPage() {
 
   const NAV: { id: Tab; label: string; Icon: IconC }[] = [
     { id: 'chat', label: 'Chat', Icon: ChatIcon },
+    { id: 'approvals', label: 'Approvals', Icon: ShieldIcon },
     { id: 'notes', label: 'Notes', Icon: NoteIcon },
     { id: 'reminders', label: 'Reminders', Icon: BellIcon },
     { id: 'activity', label: 'Activity', Icon: ClockIcon },
     { id: 'fitness', label: 'Fitness', Icon: ActivityIcon },
   ];
+  // Count badge on the Approvals tab: actions waiting for Manoj's decision.
+  const navBadge = (id: Tab) => (id === 'approvals' ? pending.length : 0);
 
   const SUGGESTIONS = [
     'Morning briefing',
@@ -573,8 +581,9 @@ export default function MayaPage() {
         </div>
         {NAV.map(({ id, label, Icon }) => (
           <button key={id} onClick={() => setTab(id)} aria-current={tab === id ? 'page' : undefined}
-            className={`w-16 py-2.5 rounded-xl flex flex-col items-center gap-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400 ${tab === id ? 'bg-white/10 text-zinc-50' : 'text-zinc-400 hover:bg-white/5 hover:text-zinc-200'}`}>
+            className={`relative w-16 py-2.5 rounded-xl flex flex-col items-center gap-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400 ${tab === id ? 'bg-white/10 text-zinc-50' : 'text-zinc-400 hover:bg-white/5 hover:text-zinc-200'}`}>
             <Icon className="w-5 h-5" />
+            {navBadge(id) > 0 && <span className="absolute top-1 right-2 min-w-[18px] h-[18px] px-1 rounded-full bg-amber-400 text-zinc-950 text-[11px] font-semibold leading-[18px] text-center"><span className="sr-only">waiting: </span>{navBadge(id)}</span>}
             <span className="text-[11px] font-medium">{label}</span>
           </button>
         ))}
@@ -805,6 +814,48 @@ export default function MayaPage() {
             </div>
           )}
 
+          {/* ── APPROVALS ── */}
+          {tab === 'approvals' && (
+            <div className="h-full overflow-y-auto">
+              <div className="mx-auto w-full max-w-3xl px-4 py-6">
+                <PageHeader title="Approvals" sub={pending.length ? `${pending.length} waiting for you` : 'Nothing waiting'} onRefresh={loadPending} />
+                {lastDecision && <p role="status" className="text-sm text-zinc-300 mb-3 break-words">{lastDecision}</p>}
+                {pending.length === 0 ? (
+                  <Empty Icon={ShieldIcon} title="Nothing needs your approval" hint="Emails, calendar invites and deletes wait here until you say yes." />
+                ) : (
+                  <div className="space-y-3">
+                    {pending.map(a => {
+                      const { label, Icon } = toolMeta(a.tool);
+                      return (
+                        <div key={a.id} role="group" aria-label={`Approval needed: ${label}`} className="rounded-2xl border border-amber-400/30 bg-amber-500/10 p-4">
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="w-6 h-6 rounded-lg bg-amber-400/20 flex items-center justify-center"><Icon className="w-3.5 h-3.5 text-amber-300" /></span>
+                            <span className="font-semibold text-amber-200">{label} · needs your approval</span>
+                          </div>
+                          <p className="text-sm text-zinc-100 mt-2 break-words">{a.summary}</p>
+                          <details className="mt-2">
+                            <summary className="text-xs text-amber-200 cursor-pointer min-h-[44px] flex items-center">Full text{a.long ? ` (${(a.detail ?? '').length} characters)` : ''}</summary>
+                            <pre className="mt-1 max-h-72 overflow-y-auto whitespace-pre-wrap break-words text-xs text-zinc-300 font-sans">{a.detail ?? a.summary}</pre>
+                          </details>
+                          <div className="flex gap-2 mt-3">
+                            <button disabled={deciding} onClick={() => decide(a, 'approve')}
+                              className="flex-1 h-11 rounded-xl bg-emerald-500 text-zinc-950 text-sm font-semibold active:scale-[0.98] transition disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-emerald-300">
+                              Approve
+                            </button>
+                            <button disabled={deciding} onClick={() => decide(a, 'reject')}
+                              className="flex-1 h-11 rounded-xl border border-white/15 text-zinc-200 text-sm font-medium hover:bg-white/5 active:scale-[0.98] transition disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400">
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* ── ACTIVITY ── */}
           {tab === 'activity' && (
             <div className="h-full overflow-y-auto">
@@ -890,8 +941,9 @@ export default function MayaPage() {
         <nav aria-label="Main" className="md:hidden border-t border-white/10 bg-zinc-950 flex shrink-0 pb-[env(safe-area-inset-bottom)]">
           {NAV.map(({ id, label, Icon }) => (
             <button key={id} onClick={() => setTab(id)} aria-current={tab === id ? 'page' : undefined}
-              className={`flex-1 min-h-[56px] flex flex-col items-center justify-center gap-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400 ${tab === id ? 'text-indigo-300' : 'text-zinc-400 active:text-zinc-200'}`}>
+              className={`relative flex-1 min-h-[56px] flex flex-col items-center justify-center gap-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400 ${tab === id ? 'text-indigo-300' : 'text-zinc-400 active:text-zinc-200'}`}>
               <Icon className="w-6 h-6" />
+              {navBadge(id) > 0 && <span className="absolute top-1 left-1/2 ml-2 min-w-[18px] h-[18px] px-1 rounded-full bg-amber-400 text-zinc-950 text-[11px] font-semibold leading-[18px] text-center"><span className="sr-only">waiting: </span>{navBadge(id)}</span>}
               <span className="text-[11px] font-medium">{label}</span>
             </button>
           ))}

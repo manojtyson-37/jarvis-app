@@ -8,6 +8,8 @@ import { createHash } from 'crypto';
 import { supabase, logTaskExecution } from '@/lib/supabase';
 import { sendEmail } from '@/lib/gmail';
 import { getGoogleAccessToken } from '@/lib/google';
+import { sendPush } from '@/lib/push';
+import { approvalPush } from '@/lib/approvals/notify';
 
 export const GATED_TOOLS = new Set([
   'send_email',
@@ -166,6 +168,10 @@ export async function queueAction(
     return 'Could not queue that action. Nothing was done.';
   }
   await logTaskExecution(userId, auditType(tool), `Queued for approval: ${v.summary}`, { pending_action_id: data.id, status: 'pending_approval' });
+  // Push so the request is seen without opening the app. Best effort: the queued row is the source of truth, so a failed push never fails the queue.
+  // Bounded wait: a slow push endpoint must not hold up the chat reply. The push keeps running after the timeout.
+  const pushed = sendPush(userId, { ...approvalPush(tool, v.args, data.id), data: { pendingId: data.id } }).catch(() => false);
+  await Promise.race([pushed, new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3_000))]);
   const longText = (str(v.args.body) || str(v.args.note) || str(v.args.description)).length > EXCERPT;
   return longText
     ? `Waiting for your approval: ${v.summary}. It has long text — open Full text on the card, then tap Approve (or "cancel" to drop it).`
