@@ -16,7 +16,7 @@ import { getGoogleAccessToken } from '@/lib/google';
 import { insertTodos } from '@/lib/todos/store';
 import { isToolUseFailed } from '@/lib/groqErrors';
 import { llm } from '@/lib/llm';
-import { parseSlotArgs, freeSlots, formatSlots, type Interval } from '@/lib/agent/slots';
+import { parseSlotArgs, freeSlots, formatSlots, busyFromEvents, type CalItem } from '@/lib/agent/slots';
 
 // Retries are handled here, not in the SDK: a daily-quota 429 carries a wait of many minutes, so the SDK would burn
 // seconds of backoff before we ever reached the fallback.
@@ -537,16 +537,12 @@ export async function executeTool(name: string, args: Record<string, unknown>, u
       if ('error' in p) return p.error;
       const token = await getGoogleAccessToken();
       if (!token) return 'Google Calendar not configured.';
-      const res = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ timeMin: `${p.from}T00:00:00+05:30`, timeMax: `${p.to}T23:59:59+05:30`, timeZone: 'Asia/Kolkata', items: [{ id: 'primary' }] }),
-      });
-      if (!res.ok) return `Calendar free/busy lookup failed: ${res.status}`;
-      const fb = await res.json() as { calendars?: { primary?: { busy?: Interval[]; errors?: unknown[] } } };
-      const cal = fb.calendars?.primary;
-      if (!cal || cal.errors?.length) return 'Calendar free/busy lookup failed.';
-      return formatSlots(freeSlots(cal.busy ?? [], p.from, p.to, p.minutes, { now: new Date() }), p.minutes);
+      // Busy times come from the event list: the granted scope (calendar.events) does not cover the freeBusy API.
+      const q = new URLSearchParams({ timeMin: `${p.from}T00:00:00+05:30`, timeMax: `${p.to}T23:59:59+05:30`, singleEvents: 'true', orderBy: 'startTime', maxResults: '250' });
+      const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${q}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) return `Calendar lookup failed: ${res.status}`;
+      const data = await res.json() as { items?: CalItem[] };
+      return formatSlots(freeSlots(busyFromEvents(data.items ?? []), p.from, p.to, p.minutes, { now: new Date() }), p.minutes);
     }
 
     case 'get_meeting_notes': {

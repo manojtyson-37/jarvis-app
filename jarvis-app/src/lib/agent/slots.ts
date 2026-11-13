@@ -69,3 +69,19 @@ export function formatSlots(slots: Interval[], minutes: number): string {
   return `Free ${minutes}-minute slots (IST, weekdays 10:00-18:00):\n` +
     slots.map(s => `• ${label(s.start)} — start ${s.start}, end ${s.end}`).join('\n');
 }
+
+export interface CalItem {
+  status?: string; transparency?: string;
+  start?: { dateTime?: string; date?: string }; end?: { dateTime?: string; date?: string };
+  attendees?: { self?: boolean; responseStatus?: string }[];
+}
+
+// Timed events that block time. Skipped: cancelled, marked "free" (transparent), declined by Manoj, and all-day
+// entries (in his calendar those are reminders and birthdays, not meetings).
+export function busyFromEvents(items: CalItem[]): Interval[] {
+  return items
+    .filter(e => e.status !== 'cancelled' && e.transparency !== 'transparent')
+    .filter(e => !(e.attendees ?? []).some(a => a.self && a.responseStatus === 'declined'))
+    .filter(e => e.start?.dateTime && e.end?.dateTime)
+    .map(e => ({ start: e.start!.dateTime!, end: e.end!.dateTime! }));
+}

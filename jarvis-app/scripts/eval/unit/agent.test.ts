@@ -1,5 +1,5 @@
 import { tierOf, allowedTools, AGENT_TOOL_TIER } from '../../../src/lib/agent/tiers';
-import { freeSlots, nextWeekRange, parseSlotArgs, istIso, formatSlots } from '../../../src/lib/agent/slots';
+import { freeSlots, nextWeekRange, parseSlotArgs, istIso, formatSlots, busyFromEvents } from '../../../src/lib/agent/slots';
 import { parseGoalIntent, parseCancelGoal } from '../../../src/lib/agent/intent';
 import { advance, newState, decisionText, repairTranscript, MAX_ROUNDS, type Deps, type ToolCall, type RunState, type ActionStatus } from '../../../src/lib/agent/loop';
 let f = 0; const ok = (n: string, c: boolean) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) f++; };
@@ -50,6 +50,13 @@ ok('parse rejects reversed', 'error' in parseSlotArgs({ from_date: '2026-11-20',
 ok('parse rejects >14 days', 'error' in parseSlotArgs({ from_date: '2026-11-01', to_date: '2026-11-30' }));
 ok('parse rejects 5 min', 'error' in parseSlotArgs({ from_date: '2026-11-16', to_date: '2026-11-16', duration_minutes: 5 }));
 ok('format empty', /No free 30-minute slot/.test(formatSlots([], 30)));
+eq('busy from events', busyFromEvents([
+  { start: { dateTime: '2026-11-16T10:00:00+05:30' }, end: { dateTime: '2026-11-16T11:00:00+05:30' } },
+  { status: 'cancelled', start: { dateTime: '2026-11-16T12:00:00+05:30' }, end: { dateTime: '2026-11-16T13:00:00+05:30' } },
+  { transparency: 'transparent', start: { dateTime: '2026-11-16T14:00:00+05:30' }, end: { dateTime: '2026-11-16T15:00:00+05:30' } },
+  { attendees: [{ self: true, responseStatus: 'declined' }], start: { dateTime: '2026-11-16T15:00:00+05:30' }, end: { dateTime: '2026-11-16T16:00:00+05:30' } },
+  { start: { date: '2026-11-16' }, end: { date: '2026-11-17' } },
+]), [{ start: '2026-11-16T10:00:00+05:30', end: '2026-11-16T11:00:00+05:30' }]);
 ok('format lists ISO', formatSlots([{ start: '2026-11-16T10:00:00+05:30', end: '2026-11-16T10:30:00+05:30' }], 30).includes('start 2026-11-16T10:00:00+05:30'));
 
 // ── intent ───────────────────────────────────────────────────────────────
