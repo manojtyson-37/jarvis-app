@@ -21,6 +21,7 @@ import { parseTodoCapture } from '@/lib/todos/capture';
 import { insertTodos } from '@/lib/todos/store';
 import { runTodoBatch } from '@/lib/todos/runner';
 import { groq, PRIMARY_MODEL, withFallback, fallbackOpts, TOOLS, executeTool } from '@/lib/chatTools';
+import { isActivityQuestion } from '@/lib/activity/feed';
 import { shouldRetryToolUseFailed, reportedError } from '@/lib/groqErrors';
 
 // Vercel's default would otherwise cut a long tool-plus-summary turn off with no message.
@@ -56,6 +57,7 @@ const SKIP_NARRATION_TOOLS = new Set([
   'log_workout', 'log_expense', 'log_income', 'delete_calendar_event',
   'complete_action_item', 'send_email', 'create_calendar_event',
   'list_emails', 'get_email', 'list_labels', 'search_drive', 'read_drive_file',
+  'get_today_activity', // factual lookup over the audit trail: returned raw, never narrated
 ]);
 
 const ACTIONISH = /\b(send|add|remind|log|save|delete|cancel|set|create|schedule|book|mark|find|search|read|summari[sz]e|move|reschedule|forward|open|list)\b/i;
@@ -106,7 +108,9 @@ export async function POST(req: NextRequest) {
           ? { type: 'function' as const, function: { name: 'list_emails' } }
           : calendarReadIntent(message)
             ? { type: 'function' as const, function: { name: 'get_calendar_events' } }
-            : 'auto' as const;
+            : isActivityQuestion(message)
+              ? { type: 'function' as const, function: { name: 'get_today_activity' } }
+              : 'auto' as const;
 
   // Only the tool definitions this message can need — see toolRouting.ts for why.
   const forcedName = typeof forcedToolChoice === 'object' ? forcedToolChoice.function.name : undefined;

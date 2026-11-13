@@ -3,7 +3,8 @@
 import type Groq from 'groq-sdk';
 import { groq, withFallback, fallbackOpts, TOOLS, executeTool } from '@/lib/chatTools';
 import { GATED_TOOLS } from '@/lib/actions';
-import { appendConversation, saveNote } from '@/lib/supabase';
+import { appendConversation, saveNote, logTaskExecution } from '@/lib/supabase';
+import { TODO_LABEL } from '@/lib/activity/feed';
 import { sendPush } from '@/lib/push';
 import { KINDS, isKind, heuristicKind, finalTier, toolsForTier, narrowAfterPrivateRead, PRIVATE_READERS, urlsIn, urlAllowed, type Kind, type Tier } from './classify';
 import { UNTRUSTED_SOURCES } from './capture';
@@ -131,6 +132,8 @@ export async function runTodoBatch(userId: string, opts: { limit?: number; budge
     const o = await runOne(item, userId, startedAt);
     await finish(userId, item.id, o.status).catch(e => console.error('todo finish failed:', (e as Error).message));
     outcomes.push(o);
+    // Timestamped outcome for the activity timeline. Read-only use; a failure here only logs.
+    await logTaskExecution(userId, 'todo', `${TODO_LABEL[o.status] ?? o.status}: ${o.text}`, { todo_id: item.id, status: o.status }).catch(e => console.error('todo audit log failed:', (e as Error).message));
   }
   const report = buildReport(outcomes);
   if (!report) return { ran: 0, reported: false };

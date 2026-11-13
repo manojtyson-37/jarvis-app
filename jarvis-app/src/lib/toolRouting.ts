@@ -1,6 +1,10 @@
+import { ACTIVITY_QUESTION_RE } from './activity/feed';
+
 // Sends the model only the tool definitions a message can plausibly need. All ~33 definitions cost ~3k tokens
 // per call, and the free Groq tier allows 8k tokens/minute, so a full set made every second message wait ~40s.
 const CATEGORIES: { tools: string[]; re: RegExp }[] = [
+  // "What did you do today": the activity timeline. The regex is shared with the forced route in the chat route.
+  { tools: ['get_today_activity'], re: ACTIVITY_QUESTION_RE },
   { tools: ['list_emails', 'get_email', 'send_email', 'list_labels'],
     // Job-search updates arrive only by email; on 2026-11-10 "Any job roles where I am moved to next stage rejected?"
     // got "I don't have a tool to track job applications" whenever the chat before it was not about email.

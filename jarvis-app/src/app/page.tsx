@@ -4,9 +4,12 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import RichMessage from '@/components/RichMessage';
 import RulesPanel from '@/components/RulesPanel';
 import { TOOL_LABELS } from '@/lib/toolLabels';
-import { ChatIcon, NoteIcon, BellIcon, ActivityIcon, MicIcon, SendIcon, XIcon, CheckIcon, LogOutIcon, WaveIcon, MailIcon, CalendarIcon, SparkIcon, TrashIcon, RefreshIcon, ShieldIcon } from '@/components/icons';
+import type { ActivitySource } from '@/lib/activity/feed';
+import { ChatIcon, NoteIcon, BellIcon, ActivityIcon, MicIcon, SendIcon, XIcon, CheckIcon, LogOutIcon, WaveIcon, MailIcon, CalendarIcon, SparkIcon, TrashIcon, RefreshIcon, ShieldIcon, ClockIcon } from '@/components/icons';
 
-type Tab = 'chat' | 'notes' | 'reminders' | 'fitness';
+type Tab = 'chat' | 'notes' | 'reminders' | 'fitness' | 'activity';
+interface TimelineItem { at: string; source: ActivitySource; text: string }
+const TIMELINE_SOURCE: Record<ActivitySource, string> = { action: 'Action', todo: 'To-do', away: 'Away', job: 'Jobs' };
 
 interface Message {
   id: string;
@@ -113,6 +116,10 @@ export default function MayaPage() {
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [workouts, setWorkouts] = useState<Workout[]>([]);
   const [dashLoading, setDashLoading] = useState(false);
+  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
+  const [timelineRange, setTimelineRange] = useState<'today' | 'week'>('today');
+  const [timelineWarnings, setTimelineWarnings] = useState<string[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
   const [greeting, setGreeting] = useState('Hello');
   const [activity, setActivity] = useState('');
 
@@ -215,8 +222,34 @@ export default function MayaPage() {
   }, []);
 
   useEffect(() => {
-    if (tab !== 'chat') loadDashboard();
+    if (tab !== 'chat' && tab !== 'activity') loadDashboard();
   }, [tab, loadDashboard]);
+
+  // Each request gets a number; only the newest one may write. Toggling Today/Week fast must not let an older reply win.
+  const timelineSeq = useRef(0);
+  const loadTimeline = useCallback(async () => {
+    const seq = ++timelineSeq.current;
+    setTimelineLoading(true);
+    try {
+      const res = await fetch(`/api/activity?range=${timelineRange}`);
+      if (seq !== timelineSeq.current) return;
+      if (!res.ok) { setTimeline([]); setTimelineWarnings(['all sources']); return; }
+      const data = await res.json() as { events: TimelineItem[]; warnings: string[] };
+      if (seq !== timelineSeq.current) return;
+      setTimeline(data.events ?? []);
+      setTimelineWarnings(data.warnings ?? []);
+    } catch {
+      if (seq !== timelineSeq.current) return;
+      setTimeline([]);
+      setTimelineWarnings(['all sources']);
+    } finally {
+      if (seq === timelineSeq.current) setTimelineLoading(false);
+    }
+  }, [timelineRange]);
+
+  useEffect(() => {
+    if (tab === 'activity') loadTimeline();
+  }, [tab, loadTimeline]);
 
   const loadPending = useCallback(async () => {
     try {
@@ -513,6 +546,7 @@ export default function MayaPage() {
     { id: 'chat', label: 'Chat', Icon: ChatIcon },
     { id: 'notes', label: 'Notes', Icon: NoteIcon },
     { id: 'reminders', label: 'Reminders', Icon: BellIcon },
+    { id: 'activity', label: 'Activity', Icon: ClockIcon },
     { id: 'fitness', label: 'Fitness', Icon: ActivityIcon },
   ];
 
@@ -765,6 +799,43 @@ export default function MayaPage() {
                         </div>
                       );
                     })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── ACTIVITY ── */}
+          {tab === 'activity' && (
+            <div className="h-full overflow-y-auto">
+              <div className="mx-auto w-full max-w-3xl px-4 py-6">
+                <PageHeader title="Activity" sub={timelineRange === 'today' ? 'Since midnight IST' : 'Last 7 days'} onRefresh={loadTimeline} />
+                <div className="flex gap-2 mb-4" role="group" aria-label="Time range">
+                  {(['today', 'week'] as const).map(r => (
+                    <button key={r} onClick={() => setTimelineRange(r)} aria-pressed={timelineRange === r}
+                      className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${timelineRange === r ? 'bg-white/10 border-white/20 text-zinc-50' : 'border-white/10 text-zinc-400 hover:text-zinc-200'}`}>
+                      {r === 'today' ? 'Today' : 'Last 7 days'}
+                    </button>
+                  ))}
+                </div>
+                {timelineWarnings.length > 0 && (
+                  <p className="text-xs text-amber-200/80 mb-3">Could not read or cut short: {timelineWarnings.join(', ')}. This list may be incomplete.</p>
+                )}
+                {timelineLoading ? (
+                  <p className="text-sm text-zinc-400 text-center mt-20" role="status">Loading…</p>
+                ) : timeline.length === 0 ? (
+                  <Empty Icon={ClockIcon} title="Nothing recorded yet" hint="Actions, to-dos, Away Mode and job updates show up here." />
+                ) : (
+                  <div className={`${card} divide-y divide-white/5`}>
+                    {timeline.map((e, i) => (
+                      <div key={`${e.at}-${i}`} className="px-4 py-3 flex flex-col sm:flex-row gap-1 sm:gap-3">
+                        <span className="text-xs text-zinc-500 sm:w-28 shrink-0 sm:pt-1">{formatIST(e.at)}</span>
+                        <div className="min-w-0">
+                          <span className="text-[0.6875rem] uppercase tracking-wide text-indigo-300">{TIMELINE_SOURCE[e.source]}</span>
+                          <p className="text-[0.9375rem] text-zinc-100 break-words">{e.text}</p>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
